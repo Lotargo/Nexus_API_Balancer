@@ -11,6 +11,7 @@ auth:
 pools:
   - name: "primary"
     description: "Main search pool for high-priority AI queries"
+    target_url: "https://api.openai.com"
     capacity: 20
     keys:
       - id: "ORG_A_Tier_1"

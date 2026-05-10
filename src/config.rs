@@ -30,6 +30,7 @@ pub struct KeyConfig {
 pub struct PoolConfig {
     pub name: String,
     pub description: Option<String>,
+    pub target_url: String,
     pub capacity: usize,
     pub keys: Vec<KeyConfig>,
 }
