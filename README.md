@@ -22,6 +22,8 @@
 - **Client Isolation**: Strict partitioning ensures clients only see and access their assigned pools.
 - **OAuth 2.1 & TTL**: Mandatory token validation with support for temporary keys (TTL).
 - **MCP Enabled**: Integrated Model Context Protocol server for AI-driven pool management.
+- **Interactive Documentation**: Premium API explorer via **Scalar** available at `/scalar`.
+- **Graceful Shutdown**: Proper signal handling (Ctrl+C) for clean termination and resource cleanup.
 - **Dynamic Configuration**: Hot-reloading of configuration via `ArcSwap` and secure API.
 
 ---
@@ -111,7 +113,12 @@ auth:
 ```bash
 cargo run
 ```
-*The server will automatically run migrations and create `nexus.db` on the first start.*
+*The server will display a professional ASCII banner and provide links to the API and documentation.*
+
+### 5. Interactive Testing
+Once the server is running, visit:
+- **Scalar UI**: `http://127.0.0.1:8080/scalar` (Interactive API explorer)
+- **Stats**: `http://127.0.0.1:8080/stats` (Requires `X-Admin-Key`)
 
 ---
 

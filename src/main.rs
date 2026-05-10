@@ -27,14 +27,12 @@ async fn main() -> Result<()> {
 
     // 1. Load Config
     let config = AppConfig::load("config.yaml")?;
-    println!("Loaded config from config.yaml");
     
     let shared_config = Arc::new(ArcSwap::from(Arc::new(config.clone())));
     
     // 1.5 Initialize Database
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:nexus.db".to_string());
     let db = Database::new(&db_url).await?;
-    println!("Database initialized and migrated.");
 
     // 2. Initialize Secret Storage
     let storage = SecretStorage::new("secrets");
@@ -58,8 +56,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    println!("Initialized pool '{}' with {} slots", pool_config.name, pool_config.keys.len());
-
     // 4. Initialize Auth
     let auth_manager = AuthManager::new(config.auth.clone());
 
@@ -68,10 +64,31 @@ async fn main() -> Result<()> {
         .merge(Scalar::with_url("/scalar", ApiDoc::openapi()));
     let addr = SocketAddr::from(([127, 0, 0, 1], config.server.port));
     
-    println!("Starting REST API & MCP Server on http://{}", addr);
+    println!(r#"
+    _   _                       ____        _                                
+   | \ | | _____  ___   _ ___  | __ )  __ _| | __ _ _ __   ___ ___ _ __ 
+   |  \| |/ _ \ \/ / | | / __| |  _ \ / _` | |/ _` | '_ \ / __/ _ \ '__|
+   | |\  |  __/>  <| |_| \__ \ | |_) | (_| | | (_| | | | | (_|  __/ |   
+   |_| \_|\___/_/\_\\__,_|___/ |____/ \__,_|_|\__,_|_| |_|\___\___|_|   
+                                                                         
+   ----------------------------------------------------------------------
+    Status:  🚀 Running
+    Address: http://{}
+    Storage: 💾 SQLite (nexus.db)
+    MCP:     ⚡ Enabled
+    Docs:    📜 http://{}/scalar
+   ----------------------------------------------------------------------
+    "#, addr, addr);
     
     let listener = TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install Ctrl+C handler");
+            println!("\nShutdown signal received, cleaning up...");
+        })
+        .await?;
 
     Ok(())
 }
