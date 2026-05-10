@@ -1,0 +1,21 @@
+[package]
+name = "nexus_balancer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+async-channel = "2.3"
+rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+uuid = { version = "1.0", features = ["v4"] }
+anyhow = "1.0"
+jsonwebtoken = "9.0"
+chrono = { version = "0.4", features = ["serde"] }
+arc-swap = "1.6"
+reqwest = { version = "0.12", features = ["json"] }
+futures = "0.3"

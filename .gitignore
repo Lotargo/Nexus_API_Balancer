@@ -1,0 +1,5 @@
+/target
+/secrets
+*.env
+.DS_Store
+Thumbs.db
