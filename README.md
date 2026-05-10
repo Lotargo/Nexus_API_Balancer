@@ -98,25 +98,12 @@ cargo build --release
 
 ### 3. Configuration
 
-1. Copy the example environment file:
+1. Copy the example files:
    ```bash
    cp .env.example .env
+   cp config.yaml.example config.yaml
    ```
-2. Edit `.env` and set your `ADMIN_API_KEY` and `DATABASE_URL`.
-
-3. Define your pools in `config.yaml`:
-
-```yaml
-server:
-  host: "127.0.0.1"
-  port: 8080
-
-auth:
-  enabled: true
-  secret: "your-secure-jwt-secret"
-  issuer: "nexus-balancer"
-  audience: "api-clients"
-```
+2. Edit `.env` and `config.yaml` to suit your needs. See `config.yaml.example` for all available parameters.
 
 ### 4. Running the Server
 
@@ -126,8 +113,19 @@ cargo run
 
 _The server will display a professional ASCII banner and provide links to the API and documentation._
 
-### 5. Interactive Testing
+### 5. Client Registration (Admin)
+To register a new client and generate an API key (JWT):
+```bash
+curl -X POST http://127.0.0.1:8080/admin/clients \
+     -H "X-Admin-Key: your-admin-secret" \
+     -H "Content-Type: application/json" \
+     -d '{"id": "my_client", "name": "Team A"}'
+```
 
+### 6. Local Usage (No Auth)
+For local or private usage, you can disable authentication in `config.yaml`. In this mode, all requests are automatically granted **Admin** privileges.
+
+### 7. Interactive Testing
 Once the server is running, visit:
 
 - **Scalar UI**: `http://127.0.0.1:8080/scalar` (Interactive API explorer)
