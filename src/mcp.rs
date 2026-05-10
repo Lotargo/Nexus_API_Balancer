@@ -11,13 +11,12 @@ pub struct UpdateDescriptionArgs {
 }
 
 pub struct BalancerMcpServer {
-    pub pool: KeyPool,
     pub config: Arc<ArcSwap<AppConfig>>,
 }
 
 impl BalancerMcpServer {
-    pub fn new(pool: KeyPool, config: Arc<ArcSwap<AppConfig>>) -> Self {
-        Self { pool, config }
+    pub fn new(_pool: KeyPool, config: Arc<ArcSwap<AppConfig>>) -> Self {
+        Self { config }
     }
 
     /// MCP Tool: List all pools with their descriptions to help agents identify them.
@@ -59,7 +58,7 @@ impl BalancerMcpServer {
 // Basic MCP JSON-RPC structures for transport integration
 #[derive(Debug, Deserialize)]
 pub struct McpRequest {
-    pub jsonrpc: String,
+    pub _jsonrpc: String,
     pub id: serde_json::Value,
     pub method: String,
     pub params: Option<serde_json::Value>,

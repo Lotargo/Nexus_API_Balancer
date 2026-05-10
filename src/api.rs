@@ -45,6 +45,7 @@ pub struct AppState {
 
 /// OAuth 2.1 Bearer Token extractor
 pub struct AuthToken(pub Claims);
+#[allow(dead_code)]
 pub struct AdminToken(pub Claims);
 
 #[async_trait]

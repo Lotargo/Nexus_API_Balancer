@@ -12,8 +12,8 @@ pub struct ApiKeyInner {
     pub last_reset: Instant,
     pub banned_until: Option<Instant>,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub secret: String,
-    pub secret_type: String,
+    pub _secret: String,
+    pub _secret_type: String,
 }
 
 /// Represents a handle to an API key with shared rate limiting state.
@@ -33,8 +33,8 @@ impl ApiKey {
                 last_reset: Instant::now(),
                 banned_until: None,
                 expires_at,
-                secret,
-                secret_type,
+                _secret: secret,
+                _secret_type: secret_type,
             })),
         }
     }
@@ -75,7 +75,7 @@ impl ApiKey {
         Ok(())
     }
 
-    pub fn set_cooldown(&self, duration: Duration) {
+    pub fn _set_cooldown(&self, duration: Duration) {
         let mut state = self.inner.lock().unwrap();
         state.banned_until = Some(Instant::now() + duration);
     }

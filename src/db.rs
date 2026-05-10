@@ -1,4 +1,5 @@
-use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+use sqlx::{sqlite::{SqlitePoolOptions, SqliteConnectOptions}, SqlitePool};
+use std::str::FromStr;
 use anyhow::Result;
 use serde::{Serialize, Deserialize};
 use utoipa::ToSchema;
@@ -21,9 +22,12 @@ pub struct LogEntry {
 
 impl Database {
     pub async fn new(db_url: &str) -> Result<Self> {
+        let opts = SqliteConnectOptions::from_str(db_url)?
+            .create_if_missing(true);
+
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
-            .connect(db_url)
+            .connect_with(opts)
             .await?;
 
         // Run migrations
