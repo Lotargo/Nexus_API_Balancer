@@ -13,22 +13,23 @@ use crate::auth::{AuthManager, Claims};
 use crate::config::{AppConfig};
 use crate::mcp::{BalancerMcpServer, McpRequest, McpResponse};
 use crate::db::{Database, LogEntry};
+use utoipa::{OpenApi, ToSchema};
 use std::time::Duration;
 use tokio::time::{sleep, Instant};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct ExecuteRequest {
     pub task_name: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ExecuteResponse {
     pub status: String,
     pub key_id: String,
     pub message: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct ConfigPatchRequest {
     pub server: Option<crate::config::ServerConfig>,
     pub auth: Option<crate::config::AuthConfig>,
@@ -135,10 +136,24 @@ pub fn create_router(pool: KeyPool, auth: AuthManager, config: Arc<ArcSwap<AppCo
         .route("/execute", post(handle_execute))
         .route("/stats", get(handle_stats))
         .route("/config", get(handle_get_config).patch(handle_patch_config))
-        .route("/mcp", post(handle_mcp)) // Standard MCP over HTTP endpoint
+        .route("/mcp", post(handle_mcp))
         .with_state(state)
 }
 
+#[utoipa::path(
+    post,
+    path = "/execute",
+    request_body = ExecuteRequest,
+    responses(
+        (status = 200, description = "Task executed successfully", body = ExecuteResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 429, description = "Rate limit exceeded")
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("admin_key" = [])
+    )
+)]
 async fn handle_execute(
     State(state): State<Arc<AppState>>,
     token: AuthToken,
@@ -196,6 +211,63 @@ async fn handle_execute(
     Json(result)
 }
 
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        handle_execute,
+        handle_stats,
+        handle_get_config,
+        handle_patch_config,
+    ),
+    components(
+        schemas(
+            ExecuteRequest, 
+            ExecuteResponse, 
+            ConfigPatchRequest, 
+            crate::config::AppConfig,
+            crate::config::ServerConfig,
+            crate::config::AuthConfig,
+            crate::config::PoolConfig,
+            crate::config::KeyConfig,
+            crate::db::LogEntry,
+        )
+    ),
+    modifiers(&SecurityAddon)
+)]
+pub struct ApiDoc;
+
+struct SecurityAddon;
+
+impl utoipa::Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let components = openapi.components.as_mut().unwrap();
+        components.add_security_scheme(
+            "bearer_auth",
+            utoipa::openapi::security::SecurityScheme::Http(
+                utoipa::openapi::security::HttpBuilder::new()
+                    .scheme(utoipa::openapi::security::HttpAuthScheme::Bearer)
+                    .bearer_format("JWT")
+                    .build(),
+            ),
+        );
+        components.add_security_scheme(
+            "admin_key",
+            utoipa::openapi::security::SecurityScheme::ApiKey(
+                utoipa::openapi::security::ApiKey::Header(utoipa::openapi::security::ApiKeyValue::new("X-Admin-Key")),
+            ),
+        );
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/stats",
+    responses(
+        (status = 200, description = "Current pool statistics", body = serde_json::Value),
+        (status = 403, description = "Forbidden")
+    ),
+    security(("admin_key" = []))
+)]
 async fn handle_stats(
     State(state): State<Arc<AppState>>,
     _token: AdminToken
@@ -204,6 +276,15 @@ async fn handle_stats(
     Json(stats)
 }
 
+#[utoipa::path(
+    get,
+    path = "/config",
+    responses(
+        (status = 200, description = "Current application configuration", body = AppConfig),
+        (status = 403, description = "Forbidden")
+    ),
+    security(("admin_key" = []))
+)]
 async fn handle_get_config(
     State(state): State<Arc<AppState>>,
     _token: AdminToken,
@@ -213,6 +294,16 @@ async fn handle_get_config(
     Json(config)
 }
 
+#[utoipa::path(
+    patch,
+    path = "/config",
+    request_body = ConfigPatchRequest,
+    responses(
+        (status = 200, description = "Configuration updated", body = AppConfig),
+        (status = 403, description = "Forbidden")
+    ),
+    security(("admin_key" = []))
+)]
 async fn handle_patch_config(
     State(state): State<Arc<AppState>>,
     _token: AdminToken,

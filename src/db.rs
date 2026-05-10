@@ -1,13 +1,14 @@
 use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 use anyhow::Result;
 use serde::{Serialize, Deserialize};
+use utoipa::ToSchema;
 
 #[derive(Debug, Clone)]
 pub struct Database {
     pub pool: SqlitePool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct LogEntry {
     pub client_id: Option<String>,
     pub key_id: Option<String>,

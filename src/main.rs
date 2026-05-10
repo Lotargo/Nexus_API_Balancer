@@ -16,6 +16,9 @@ use tokio::net::TcpListener;
 use std::sync::Arc;
 use arc_swap::ArcSwap;
 use crate::db::Database;
+use utoipa::OpenApi;
+use utoipa_scalar::{Scalar, Servable};
+use crate::api::ApiDoc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -61,7 +64,8 @@ async fn main() -> Result<()> {
     let auth_manager = AuthManager::new(config.auth.clone());
 
     // 5. Start REST API
-    let app = api::create_router(pool, auth_manager, shared_config, db);
+    let app = api::create_router(pool, auth_manager, shared_config, db)
+        .merge(Scalar::with_url("/scalar", ApiDoc::openapi()));
     let addr = SocketAddr::from(([127, 0, 0, 1], config.server.port));
     
     println!("Starting REST API & MCP Server on http://{}", addr);

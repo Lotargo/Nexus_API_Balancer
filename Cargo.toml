@@ -21,3 +21,5 @@ reqwest = { version = "0.12", features = ["json"] }
 futures = "0.3"
 sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls", "macros", "chrono"] }
 dotenvy = "0.15"
+utoipa = { version = "5.5", features = ["axum_extras", "chrono"] }
+utoipa-scalar = { version = "0.2", features = ["axum"] }

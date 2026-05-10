@@ -1,14 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use anyhow::Result;
+use utoipa::ToSchema;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct AuthConfig {
     pub enabled: bool,
     pub secret: String,
@@ -16,7 +17,7 @@ pub struct AuthConfig {
     pub audience: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct KeyConfig {
     pub id: String,
     pub limit: u32,
@@ -25,7 +26,7 @@ pub struct KeyConfig {
     pub secret_type: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct PoolConfig {
     pub name: String,
     pub description: Option<String>,
@@ -33,7 +34,7 @@ pub struct PoolConfig {
     pub keys: Vec<KeyConfig>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct AppConfig {
     pub server: ServerConfig,
     pub auth: AuthConfig,
