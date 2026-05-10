@@ -44,6 +44,7 @@ pub struct AppState {
 
 /// OAuth 2.1 Bearer Token extractor
 pub struct AuthToken(pub Claims);
+pub struct AdminToken(pub Claims);
 
 #[async_trait]
 impl<S> FromRequestParts<S> for AuthToken
@@ -56,6 +57,23 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let state = Arc::from_ref(state);
         
+        // 1. Check for X-Admin-Key (Bypass for admin)
+        let admin_header = parts.headers.get("X-Admin-Key").and_then(|h| h.to_str().ok());
+        let admin_secret = std::env::var("ADMIN_API_KEY").unwrap_or_else(|_| "change-me".to_string());
+
+        if let Some(key) = admin_header {
+            if key == admin_secret {
+                return Ok(AuthToken(Claims {
+                    sub: "admin-bypass".to_string(),
+                    exp: 0,
+                    iss: "internal".to_string(),
+                    aud: "admin".to_string(),
+                    role: Some("admin".to_string()),
+                }));
+            }
+        }
+
+        // 2. Check for Bearer token
         let auth_header = parts
             .headers
             .get(AUTHORIZATION)
@@ -70,7 +88,25 @@ where
                     Err(e) => Err((StatusCode::UNAUTHORIZED, format!("Unauthorized: {}", e))),
                 }
             }
-            None => Err((StatusCode::UNAUTHORIZED, "Missing Bearer token in Authorization header".to_string())),
+            None => Err((StatusCode::UNAUTHORIZED, "Missing authentication".to_string())),
+        }
+    }
+}
+
+#[async_trait]
+impl<S> FromRequestParts<S> for AdminToken
+where
+    Arc<AppState>: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let auth = AuthToken::from_request_parts(parts, state).await?;
+        if auth.0.role.as_deref() == Some("admin") || auth.0.sub == "admin-bypass" {
+            Ok(AdminToken(auth.0))
+        } else {
+            Err((StatusCode::FORBIDDEN, "Admin privileges required".to_string()))
         }
     }
 }
@@ -162,7 +198,7 @@ async fn handle_execute(
 
 async fn handle_stats(
     State(state): State<Arc<AppState>>,
-    _token: AuthToken
+    _token: AdminToken
 ) -> Json<serde_json::Value> {
     let stats = state.db.get_stats().await.unwrap_or_else(|_| serde_json::json!({"error": "Failed to fetch stats"}));
     Json(stats)
@@ -170,7 +206,7 @@ async fn handle_stats(
 
 async fn handle_get_config(
     State(state): State<Arc<AppState>>,
-    _token: AuthToken,
+    _token: AdminToken,
 ) -> Json<AppConfig> {
     let mut config = (**state.config.load()).clone();
     config.auth.secret = "[REDACTED]".to_string();
@@ -179,7 +215,7 @@ async fn handle_get_config(
 
 async fn handle_patch_config(
     State(state): State<Arc<AppState>>,
-    _token: AuthToken,
+    _token: AdminToken,
     Json(payload): Json<ConfigPatchRequest>,
 ) -> Json<AppConfig> {
     let current_config = state.config.load();
@@ -202,13 +238,39 @@ async fn handle_patch_config(
 /// Simple MCP JSON-RPC handler
 async fn handle_mcp(
     State(state): State<Arc<AppState>>,
-    _token: AuthToken,
+    token: AuthToken,
     Json(request): Json<McpRequest>,
 ) -> Json<McpResponse> {
     let result = match request.method.as_str() {
-        "list_pools" => Some(serde_json::to_value(state.mcp.list_pools().await).unwrap()),
+        "list_pools" => {
+            let allowed_pools = if token.0.role.as_deref() == Some("admin") {
+                None // Admin sees all
+            } else {
+                Some(state.db.get_allowed_pools(&token.0.sub).await.unwrap_or_default())
+            };
+
+            let mut pools = state.mcp.list_pools().await;
+            if let Some(allowed) = allowed_pools {
+                pools.retain(|p| {
+                    if let Some(name) = p["name"].as_str() {
+                        allowed.contains(&name.to_string())
+                    } else {
+                        false
+                    }
+                });
+            }
+            Some(serde_json::to_value(pools).unwrap())
+        },
         "get_config" => Some(state.mcp.get_config_resource().await),
         "update_description" => {
+            if token.0.role.as_deref() != Some("admin") && token.0.sub != "admin-bypass" {
+                return Json(McpResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request.id,
+                    result: None,
+                    error: Some(serde_json::Value::String("Admin privileges required for this MCP method".to_string())),
+                });
+            }
             let args: crate::mcp::UpdateDescriptionArgs = serde_json::from_value(request.params.unwrap_or_default()).unwrap();
             match state.mcp.update_pool_description(args).await {
                 Ok(msg) => Some(serde_json::Value::String(msg)),

@@ -32,6 +32,15 @@ CREATE TABLE IF NOT EXISTS clients (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 3.1 Client to Pool Mapping (Isolation)
+CREATE TABLE IF NOT EXISTS client_pools (
+    client_id TEXT NOT NULL,
+    pool_id TEXT NOT NULL,
+    PRIMARY KEY (client_id, pool_id),
+    FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
+    FOREIGN KEY (pool_id) REFERENCES pools(id) ON DELETE CASCADE
+);
+
 -- 4. Request Logs (for analytics and history)
 CREATE TABLE IF NOT EXISTS request_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -9,6 +9,7 @@ pub struct Claims {
     pub exp: usize,
     pub iss: String,
     pub aud: String,
+    pub role: Option<String>,
 }
 
 pub struct AuthManager {
@@ -33,6 +34,7 @@ impl AuthManager {
                 exp: 0,
                 iss: "".to_string(),
                 aud: "".to_string(),
+                role: None,
             });
         }
 

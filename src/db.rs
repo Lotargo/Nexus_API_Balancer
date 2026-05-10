@@ -66,4 +66,15 @@ impl Database {
             "success_rate": success_rate,
         }))
     }
+
+    pub async fn get_allowed_pools(&self, client_id: &str) -> Result<Vec<String>> {
+        let pools: Vec<String> = sqlx::query_scalar(
+            "SELECT pool_id FROM client_pools WHERE client_id = ?"
+        )
+        .bind(client_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(pools)
+    }
 }

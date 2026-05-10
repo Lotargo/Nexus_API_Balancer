@@ -19,6 +19,9 @@ use crate::db::Database;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // 0. Load Environment Variables
+    dotenvy::dotenv().ok();
+
     // 1. Load Config
     let config = AppConfig::load("config.yaml")?;
     println!("Loaded config from config.yaml");
