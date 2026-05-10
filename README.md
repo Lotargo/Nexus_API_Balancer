@@ -16,11 +16,13 @@
 ## 🚀 Features
 
 - **High Concurrency**: Asynchronous pool management using `tokio` and `async-channel`.
-- **Global Rate Limiting**: Shared thread-safe state via `Arc<Mutex>` ensures strict RPS limits across all workers.
-- **OAuth 2.1 Protected**: Mandatory Bearer token validation for all administrative and operational endpoints.
-- **MCP Enabled**: Integrated Model Context Protocol server allowing AI agents to manage pools and descriptions dynamically.
-- **Dynamic Configuration**: Hot-reloading of configuration parameters via `ArcSwap` and REST/MCP API.
-- **Secure Storage**: Externalized secrets management with support for multiple key types and individual settings.
+- **Persistent Storage**: SQLite integration for tracking pools, keys, and clients with full transactionality.
+- **Observability**: Detailed request logging for analytics, latency tracking, and error auditing.
+- **Admin Protection**: Dedicated administrative layer secured via `.env` secrets and `X-Admin-Key` headers.
+- **Client Isolation**: Strict partitioning ensures clients only see and access their assigned pools.
+- **OAuth 2.1 & TTL**: Mandatory token validation with support for temporary keys (TTL).
+- **MCP Enabled**: Integrated Model Context Protocol server for AI-driven pool management.
+- **Dynamic Configuration**: Hot-reloading of configuration via `ArcSwap` and secure API.
 
 ---
 
@@ -29,17 +31,17 @@
 ```mermaid
 graph TD
     Client[AI Client / Swarm Node] -- OAuth 2.1 Bearer --> API[Axum REST/MCP API]
+    Admin[Administrator] -- X-Admin-Key --> API
     API -- Extract Claims --> Auth[Auth Manager]
-    Auth -- Validate JWT --> API
+    Auth -- Validate JWT / Admin Secret --> API
+    API -- Isolation Filter --> DB[(SQLite DB)]
     API -- Acquire Slot --> Pool[Key Pool]
     Pool -- Shared State --> Key[API Key Inner]
-    Key -- Check RPS/Ban --> Pool
+    Key -- Check RPS/TTL/Ban --> Pool
     Pool -- Slot Granted --> Worker[Worker Thread]
     Worker -- Execute Request --> Provider[External API Provider]
     Worker -- Release Slot --> Pool
-    
-    Agent[MCP Agent] -- JSON-RPC --> API
-    API -- Update Config --> Store[ArcSwap AppConfig]
+    API -- Async Log --> DB
 ```
 
 ---
@@ -86,7 +88,13 @@ cargo build --release
 ```
 
 ### 3. Configuration
-Define your pools and security settings in `config.yaml`:
+1. Copy the example environment file:
+   ```bash
+   cp .env.example .env
+   ```
+2. Edit `.env` and set your `ADMIN_API_KEY` and `DATABASE_URL`.
+
+3. Define your pools in `config.yaml`:
 ```yaml
 server:
   host: "127.0.0.1"
@@ -97,23 +105,13 @@ auth:
   secret: "your-secure-jwt-secret"
   issuer: "nexus-balancer"
   audience: "api-clients"
-
-pools:
-  - name: "primary"
-    description: "Main search pool for high-priority AI queries"
-    capacity: 20
-    keys:
-      - id: "ORG_A_Tier_1"
-        limit: 10
-        concurrency: 5
-        secret_name: "org_a_api_key"
-        secret_type: "api_key"
 ```
 
 ### 4. Running the Server
 ```bash
 cargo run
 ```
+*The server will automatically run migrations and create `nexus.db` on the first start.*
 
 ---
 
@@ -123,10 +121,11 @@ cargo run
 
 | Method | Endpoint | Description | Auth Required |
 | :--- | :--- | :--- | :--- |
-| `POST` | `/execute` | Run a task through the balancer | OAuth 2.1 |
-| `GET` | `/stats` | View current pool health | OAuth 2.1 |
-| `GET` | `/config` | View current configuration | OAuth 2.1 |
-| `PATCH` | `/config` | Update configuration dynamically | OAuth 2.1 |
+| `POST` | `/execute` | Run a task through the balancer | OAuth 2.1 (Client) |
+| `GET` | `/stats` | View real-time DB analytics | Admin Key |
+| `GET` | `/config` | View current configuration | Admin Key |
+| `PATCH` | `/config` | Update configuration dynamically | Admin Key |
+| `POST` | `/mcp` | MCP JSON-RPC interface | OAuth 2.1 / Admin |
 
 ### MCP (Model Context Protocol)
 
