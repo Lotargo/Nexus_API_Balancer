@@ -30,6 +30,17 @@ pub struct ExecuteResponse {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+pub struct RegisterClientRequest {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RegisterClientResponse {
+    pub token: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct ConfigPatchRequest {
     pub server: Option<crate::config::ServerConfig>,
     pub auth: Option<crate::config::AuthConfig>,
@@ -58,6 +69,18 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let state = Arc::from_ref(state);
+        let config = state.config.load();
+
+        // 0. Bypass if auth is disabled (for local usage)
+        if !config.auth.enabled {
+            return Ok(AuthToken(Claims {
+                sub: "local-client".to_string(),
+                exp: 0,
+                iss: "local".to_string(),
+                aud: "local".to_string(),
+                role: Some("admin".to_string()),
+            }));
+        }
         
         // 1. Check for X-Admin-Key (Bypass for admin)
         let admin_header = parts.headers.get("X-Admin-Key").and_then(|h| h.to_str().ok());
@@ -137,6 +160,7 @@ pub fn create_router(pool: KeyPool, auth: AuthManager, config: Arc<ArcSwap<AppCo
         .route("/execute", post(handle_execute))
         .route("/stats", get(handle_stats))
         .route("/config", get(handle_get_config).patch(handle_patch_config))
+        .route("/admin/clients", post(handle_register_client))
         .route("/mcp", post(handle_mcp))
         .with_state(state)
 }
@@ -224,6 +248,8 @@ async fn handle_execute(
         schemas(
             ExecuteRequest, 
             ExecuteResponse, 
+            RegisterClientRequest,
+            RegisterClientResponse,
             ConfigPatchRequest, 
             crate::config::AppConfig,
             crate::config::ServerConfig,
@@ -236,6 +262,30 @@ async fn handle_execute(
     modifiers(&SecurityAddon)
 )]
 pub struct ApiDoc;
+
+#[utoipa::path(
+    post,
+    path = "/admin/clients",
+    request_body = RegisterClientRequest,
+    responses(
+        (status = 200, description = "Client registered successfully", body = RegisterClientResponse),
+        (status = 403, description = "Forbidden")
+    ),
+    security(("admin_key" = []))
+)]
+async fn handle_register_client(
+    State(state): State<Arc<AppState>>,
+    _token: AdminToken,
+    Json(payload): Json<RegisterClientRequest>,
+) -> (StatusCode, Json<RegisterClientResponse>) {
+    let token = state.auth.generate_token(&payload.id, None).unwrap();
+    
+    if let Err(e) = state.db.register_client(&payload.id, &payload.name, &token).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(RegisterClientResponse { token: format!("Error: {}", e) }));
+    }
+
+    (StatusCode::CREATED, Json(RegisterClientResponse { token }))
+}
 
 struct SecurityAddon;
 
