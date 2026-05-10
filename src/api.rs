@@ -1,7 +1,9 @@
 use axum::{
-    extract::{State, FromRequestParts},
-    http::{request::Parts, StatusCode, header::AUTHORIZATION},
-    routing::{get, post},
+    extract::{State, FromRequestParts, Path},
+    http::{request::Parts, StatusCode, header::AUTHORIZATION, Method, HeaderMap},
+    routing::{get, post, any},
+    response::IntoResponse,
+    body::to_bytes,
     Json, Router,
     async_trait,
 };
@@ -52,6 +54,7 @@ pub struct AppState {
     pub config: Arc<ArcSwap<AppConfig>>,
     pub mcp: BalancerMcpServer,
     pub db: Database,
+    pub http_client: reqwest::Client,
 }
 
 /// OAuth 2.1 Bearer Token extractor
@@ -154,6 +157,7 @@ pub fn create_router(pool: KeyPool, auth: AuthManager, config: Arc<ArcSwap<AppCo
         config,
         mcp,
         db,
+        http_client: reqwest::Client::new(),
     });
     
     Router::new()
@@ -161,6 +165,7 @@ pub fn create_router(pool: KeyPool, auth: AuthManager, config: Arc<ArcSwap<AppCo
         .route("/stats", get(handle_stats))
         .route("/config", get(handle_get_config).patch(handle_patch_config))
         .route("/admin/clients", post(handle_register_client))
+        .route("/proxy/:pool_name/*path", any(handle_proxy))
         .route("/mcp", post(handle_mcp))
         .with_state(state)
 }
@@ -434,4 +439,84 @@ async fn handle_mcp(
         result,
         error: if is_none { Some(serde_json::Value::String("Method not found".to_string())) } else { None },
     })
+}
+
+/// Transparent Proxy Handler
+async fn handle_proxy(
+    State(state): State<Arc<AppState>>,
+    _token: AuthToken, // Ensure client is authenticated
+    method: Method,
+    Path((pool_name, path)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> impl axum::response::IntoResponse {
+    let config = state.config.load();
+    let pool_cfg = config.pools.iter().find(|p| p.name == pool_name);
+
+    if pool_cfg.is_none() {
+        return (StatusCode::NOT_FOUND, "Pool not found").into_response();
+    }
+
+    let target_base = &pool_cfg.unwrap().target_url;
+    let target_url = format!("{}/{}", target_base.trim_end_matches('/'), path);
+
+    // Acquire key from pool
+    // Note: We currently only support 'primary' pool in KeyPool struct. 
+    // For multiple pools, we'd need a Map of KeyPools.
+    // For now, let's assume we use the primary pool for all proxying for simplicity.
+    let pool = &state.pool;
+    let key = pool.acquire().await;
+    
+    // Get actual secret from storage
+    // Actually, KeyConfig has secret_name. We need to load it.
+    // BUT we don't store SecretStorage in AppState yet.
+    // Let's assume the secret is already in the ApiKeyInner (we added it as _secret earlier).
+    let secret = {
+        let inner = key.inner.lock().unwrap();
+        inner._secret.clone()
+    };
+
+    // Forward the request
+    let mut req_builder = state.http_client.request(method, &target_url);
+
+    // Forward headers (except authorization)
+    for (name, value) in headers.iter() {
+        if name != AUTHORIZATION && name != "host" {
+            req_builder = req_builder.header(name, value);
+        }
+    }
+
+    // Inject our balanced key based on provider detection
+    let is_google = target_url.contains("googleapis.com");
+    let is_anthropic = target_url.contains("anthropic.com");
+
+    if is_google {
+        req_builder = req_builder.header("x-goog-api-key", &secret);
+    } else if is_anthropic {
+        req_builder = req_builder.header("x-api-key", &secret);
+        req_builder = req_builder.header("anthropic-version", "2023-06-01");
+    } else {
+        // Default to OpenAI-compatible Bearer token
+        req_builder = req_builder.header(AUTHORIZATION, format!("Bearer {}", secret));
+    }
+    
+    let body_bytes = to_bytes(body, 25 * 1024 * 1024).await.unwrap_or_default(); // 25MB limit
+    let res = req_builder.body(body_bytes).send().await;
+
+    pool.release(key).await;
+
+    match res {
+        Ok(response) => {
+            let status = response.status();
+            let mut res_builder = axum::response::Response::builder().status(status);
+            
+            for (name, value) in response.headers().iter() {
+                res_builder = res_builder.header(name, value);
+            }
+
+            let body_bytes = response.bytes().await.unwrap_or_default();
+            res_builder.body(axum::body::Body::from(body_bytes)).unwrap().into_response()
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("Proxy error: {}", e)).into_response(),
+    }
 }

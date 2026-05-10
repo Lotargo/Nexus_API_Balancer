@@ -15,6 +15,8 @@ auth:
 pools:
   - name: "primary"
     description: "Main search pool for high-priority AI queries"
+    # The official API base URL of the provider (e.g., OpenAI, Gemini, Anthropic)
+    target_url: "https://api.openai.com"
     capacity: 20
     keys:
       - id: "PRO_PLAN_KEY_1"
