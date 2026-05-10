@@ -1,0 +1,34 @@
+# Nexus API Balancer Configuration Example
+
+server:
+  host: "127.0.0.1"
+  port: 8080
+
+auth:
+  # Set to false for local usage (grants admin rights to all requests)
+  enabled: true
+  # Shared secret for signing/validating JWT tokens
+  secret: "change-this-to-a-secure-random-string"
+  issuer: "nexus-balancer"
+  audience: "api-clients"
+
+pools:
+  - name: "primary"
+    description: "Main search pool for high-priority AI queries"
+    capacity: 20
+    keys:
+      - id: "PRO_PLAN_KEY_1"
+        # Requests per second (RPS) limit for this specific key
+        limit: 10
+        # Number of concurrent slots this key can occupy in the pool
+        concurrency: 5
+        # Name of the file in the 'secrets' directory containing the actual key
+        secret_name: "pro_key_1"
+        # Type for documentation and logic (e.g., api_key, connection_string)
+        secret_type: "api_key"
+      
+      - id: "FREE_TIER_KEY"
+        limit: 1
+        concurrency: 1
+        secret_name: "free_key"
+        secret_type: "api_key"
