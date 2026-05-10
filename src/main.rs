@@ -4,6 +4,7 @@ mod storage;
 mod api;
 mod auth;
 mod mcp;
+mod db;
 
 use anyhow::Result;
 use crate::config::AppConfig;
@@ -14,6 +15,7 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use std::sync::Arc;
 use arc_swap::ArcSwap;
+use crate::db::Database;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -22,6 +24,11 @@ async fn main() -> Result<()> {
     println!("Loaded config from config.yaml");
     
     let shared_config = Arc::new(ArcSwap::from(Arc::new(config.clone())));
+    
+    // 1.5 Initialize Database
+    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:nexus.db".to_string());
+    let db = Database::new(&db_url).await?;
+    println!("Database initialized and migrated.");
 
     // 2. Initialize Secret Storage
     let storage = SecretStorage::new("secrets");
@@ -37,6 +44,7 @@ async fn main() -> Result<()> {
             key_cfg.limit,
             secret,
             key_cfg.secret_type.clone(),
+            None,
         );
 
         for _ in 0..key_cfg.concurrency {
@@ -50,7 +58,7 @@ async fn main() -> Result<()> {
     let auth_manager = AuthManager::new(config.auth.clone());
 
     // 5. Start REST API
-    let app = api::create_router(pool, auth_manager, shared_config);
+    let app = api::create_router(pool, auth_manager, shared_config, db);
     let addr = SocketAddr::from(([127, 0, 0, 1], config.server.port));
     
     println!("Starting REST API & MCP Server on http://{}", addr);

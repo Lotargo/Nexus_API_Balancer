@@ -1,7 +1,7 @@
 use axum::{
     extract::{State, FromRequestParts},
     http::{request::Parts, StatusCode, header::AUTHORIZATION},
-    routing::{get, post, patch},
+    routing::{get, post},
     Json, Router,
     async_trait,
 };
@@ -12,8 +12,9 @@ use crate::core::{KeyPool};
 use crate::auth::{AuthManager, Claims};
 use crate::config::{AppConfig};
 use crate::mcp::{BalancerMcpServer, McpRequest, McpResponse};
+use crate::db::{Database, LogEntry};
 use std::time::Duration;
-use tokio::time::sleep;
+use tokio::time::{sleep, Instant};
 
 #[derive(Debug, Deserialize)]
 pub struct ExecuteRequest {
@@ -38,6 +39,7 @@ pub struct AppState {
     pub auth: AuthManager,
     pub config: Arc<ArcSwap<AppConfig>>,
     pub mcp: BalancerMcpServer,
+    pub db: Database,
 }
 
 /// OAuth 2.1 Bearer Token extractor
@@ -83,13 +85,14 @@ impl FromRef<Arc<AppState>> for Arc<AppState> {
     }
 }
 
-pub fn create_router(pool: KeyPool, auth: AuthManager, config: Arc<ArcSwap<AppConfig>>) -> Router {
+pub fn create_router(pool: KeyPool, auth: AuthManager, config: Arc<ArcSwap<AppConfig>>, db: Database) -> Router {
     let mcp = BalancerMcpServer::new(pool.clone(), config.clone());
     let state = Arc::new(AppState { 
         pool, 
         auth,
         config,
         mcp,
+        db,
     });
     
     Router::new()
@@ -102,35 +105,67 @@ pub fn create_router(pool: KeyPool, auth: AuthManager, config: Arc<ArcSwap<AppCo
 
 async fn handle_execute(
     State(state): State<Arc<AppState>>,
-    _token: AuthToken,
+    token: AuthToken,
     Json(payload): Json<ExecuteRequest>,
 ) -> Json<ExecuteResponse> {
+    let start = Instant::now();
     let pool = &state.pool;
     let key = pool.acquire().await;
     
-    if let Err(e) = key.try_use() {
+    let result = if let Err(e) = key.try_use() {
         pool.release(key).await;
-        return Json(ExecuteResponse {
+        
+        let response = ExecuteResponse {
             status: "error".to_string(),
             key_id: "none".to_string(),
             message: format!("Rate limit hit: {}", e),
-        });
-    }
+        };
 
-    sleep(Duration::from_millis(50)).await;
-    
-    let key_id = key.id();
-    pool.release(key).await;
+        // Log failure
+        let _ = state.db.log_request(LogEntry {
+            client_id: Some(token.0.sub),
+            key_id: None,
+            pool_id: None,
+            status: "rate_limited".to_string(),
+            latency_ms: Some(start.elapsed().as_millis() as i64),
+            error_message: Some(e.to_string()),
+            request_ip: None,
+        }).await;
 
-    Json(ExecuteResponse {
+        return Json(response);
+    } else {
+        sleep(Duration::from_millis(50)).await;
+        
+        let key_id = key.id();
+        pool.release(key).await;
+
+        ExecuteResponse {
+            status: "success".to_string(),
+            key_id: key_id.clone(),
+            message: format!("Task '{}' completed safely", payload.task_name),
+        }
+    };
+
+    // Log success
+    let _ = state.db.log_request(LogEntry {
+        client_id: Some(token.0.sub),
+        key_id: Some(result.key_id.clone()),
+        pool_id: None,
         status: "success".to_string(),
-        key_id,
-        message: format!("Task '{}' completed safely", payload.task_name),
-    })
+        latency_ms: Some(start.elapsed().as_millis() as i64),
+        error_message: None,
+        request_ip: None,
+    }).await;
+
+    Json(result)
 }
 
-async fn handle_stats(_token: AuthToken) -> &'static str {
-    "Pool stats: Operational"
+async fn handle_stats(
+    State(state): State<Arc<AppState>>,
+    _token: AuthToken
+) -> Json<serde_json::Value> {
+    let stats = state.db.get_stats().await.unwrap_or_else(|_| serde_json::json!({"error": "Failed to fetch stats"}));
+    Json(stats)
 }
 
 async fn handle_get_config(

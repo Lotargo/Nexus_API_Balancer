@@ -1,6 +1,6 @@
 use async_channel::{bounded, Receiver, Sender};
 use std::time::Duration;
-use tokio::time::{sleep, Instant};
+use tokio::time::Instant;
 use std::sync::{Arc, Mutex};
 
 /// Internal state of an API key, shared across multiple pool slots.
@@ -11,6 +11,7 @@ pub struct ApiKeyInner {
     pub requests_this_second: u32,
     pub last_reset: Instant,
     pub banned_until: Option<Instant>,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub secret: String,
     pub secret_type: String,
 }
@@ -23,7 +24,7 @@ pub struct ApiKey {
 
 impl ApiKey {
     /// Creates a new ApiKey instance with shared state.
-    pub fn new(id: &str, tier_limit: u32, secret: String, secret_type: String) -> Self {
+    pub fn new(id: &str, tier_limit: u32, secret: String, secret_type: String, expires_at: Option<chrono::DateTime<chrono::Utc>>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(ApiKeyInner {
                 id: id.to_string(),
@@ -31,6 +32,7 @@ impl ApiKey {
                 requests_this_second: 0,
                 last_reset: Instant::now(),
                 banned_until: None,
+                expires_at,
                 secret,
                 secret_type,
             })),
@@ -51,6 +53,12 @@ impl ApiKey {
                 return Err("Key is currently cooling down");
             } else {
                 state.banned_until = None;
+            }
+        }
+
+        if let Some(expires) = state.expires_at {
+            if chrono::Utc::now() > expires {
+                return Err("Key has expired");
             }
         }
 
