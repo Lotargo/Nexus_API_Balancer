@@ -82,4 +82,17 @@ impl Database {
 
         Ok(pools)
     }
+
+    pub async fn register_client(&self, id: &str, name: &str, token: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO clients (id, name, auth_token, status) VALUES (?, ?, ?, 'active')"
+        )
+        .bind(id)
+        .bind(name)
+        .bind(token)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
 }

@@ -1,4 +1,4 @@
-use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Validation, Algorithm, Header};
 use serde::{Deserialize, Serialize};
 use anyhow::{anyhow, Result};
 use crate::config::AuthConfig;
@@ -50,5 +50,26 @@ impl AuthManager {
         ).map_err(|e| anyhow!("Invalid token: {}", e))?;
 
         Ok(token_data.claims)
+    }
+
+    pub fn generate_token(&self, sub: &str, role: Option<String>) -> Result<String> {
+        let expiration = chrono::Utc::now()
+            .checked_add_signed(chrono::Duration::days(365))
+            .expect("valid timestamp")
+            .timestamp() as usize;
+
+        let claims = Claims {
+            sub: sub.to_string(),
+            exp: expiration,
+            iss: self.config.issuer.clone(),
+            aud: self.config.audience.clone(),
+            role,
+        };
+
+        encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(self.config.secret.as_bytes()),
+        ).map_err(|e| anyhow!("Token generation failed: {}", e))
     }
 }
