@@ -4,7 +4,7 @@ server:
 auth:
   enabled: true
   public_registration: false
-  master_key: nexus-master-key-2024
+  master_key: nexus-master-key-2026
   secret: your-secure-jwt-secret
   issuer: nexus-balancer
   audience: api-clients
