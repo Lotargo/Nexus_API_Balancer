@@ -9,7 +9,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::collections::HashMap;
 use arc_swap::ArcSwap;
+use uuid::Uuid;
 use crate::core::{KeyPool};
 use crate::auth::{AuthManager, Claims};
 use crate::config::{AppConfig};
@@ -33,12 +35,13 @@ pub struct ExecuteResponse {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RegisterClientRequest {
-    pub id: String,
+    pub id: Option<String>,
     pub name: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct RegisterClientResponse {
+    pub client_id: String,
     pub token: String,
 }
 
@@ -48,12 +51,25 @@ pub struct ConfigPatchRequest {
     pub auth: Option<crate::config::AuthConfig>,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct KeyExportResponse {
+    pub key: crate::config::KeyConfig,
+    pub secret: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct KeyImportRequest {
+    pub key: crate::config::KeyConfig,
+    pub secret: String,
+}
+
 pub struct AppState {
-    pub pool: KeyPool,
+    pub pools: HashMap<String, KeyPool>,
     pub auth: AuthManager,
     pub config: Arc<ArcSwap<AppConfig>>,
     pub mcp: BalancerMcpServer,
     pub db: Database,
+    pub storage: crate::storage::SecretStorage,
     pub http_client: reqwest::Client,
 }
 
@@ -111,6 +127,20 @@ where
 
         match auth_header {
             Some(token) => {
+                // 2.1 Check for Master Key (Universal shared secret)
+                if let Some(ref master) = config.auth.master_key {
+                    if token == master {
+                        return Ok(AuthToken(Claims {
+                            sub: "master-user".to_string(),
+                            exp: 0,
+                            iss: "internal".to_string(),
+                            aud: "all".to_string(),
+                            role: Some("admin".to_string()),
+                        }));
+                    }
+                }
+
+                // 2.2 Standard JWT validation
                 match state.auth.validate_token(token) {
                     Ok(claims) => Ok(AuthToken(claims)),
                     Err(e) => Err((StatusCode::UNAUTHORIZED, format!("Unauthorized: {}", e))),
@@ -149,14 +179,23 @@ impl FromRef<Arc<AppState>> for Arc<AppState> {
     }
 }
 
-pub fn create_router(pool: KeyPool, auth: AuthManager, config: Arc<ArcSwap<AppConfig>>, db: Database) -> Router {
-    let mcp = BalancerMcpServer::new(pool.clone(), config.clone());
+pub fn create_router(
+    pools: HashMap<String, KeyPool>, 
+    auth: AuthManager, 
+    config: Arc<ArcSwap<AppConfig>>, 
+    db: Database,
+    storage: crate::storage::SecretStorage,
+) -> Router {
+    // Note: MCP currently still uses 'primary' pool or first pool for simplicity
+    let mcp = BalancerMcpServer::new(pools.clone(), config.clone(), storage.clone());
+    
     let state = Arc::new(AppState { 
-        pool, 
+        pools, 
         auth,
         config,
         mcp,
         db,
+        storage,
         http_client: reqwest::Client::new(),
     });
     
@@ -164,10 +203,46 @@ pub fn create_router(pool: KeyPool, auth: AuthManager, config: Arc<ArcSwap<AppCo
         .route("/execute", post(handle_execute))
         .route("/stats", get(handle_stats))
         .route("/config", get(handle_get_config).patch(handle_patch_config))
+        .route("/auth/register", post(handle_public_register))
         .route("/admin/clients", post(handle_register_client))
+        .route("/admin/keys/:pool_name/:key_id", get(handle_export_key))
+        .route("/admin/keys/:pool_name", post(handle_import_key))
         .route("/proxy/:pool_name/*path", any(handle_proxy))
         .route("/mcp", post(handle_mcp))
         .with_state(state)
+}
+
+/// Public endpoint for client registration (if enabled)
+#[utoipa::path(
+    post,
+    path = "/auth/register",
+    request_body = RegisterClientRequest,
+    responses(
+        (status = 201, description = "Client registered successfully", body = RegisterClientResponse),
+        (status = 403, description = "Public registration is disabled"),
+        (status = 500, description = "Internal server error")
+    )
+)]
+async fn handle_public_register(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<RegisterClientRequest>,
+) -> impl IntoResponse {
+    let config = state.config.load();
+    if !config.auth.public_registration {
+        return (StatusCode::FORBIDDEN, "Public registration is disabled").into_response();
+    }
+
+    let client_id = payload.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let token = state.auth.generate_token(&client_id, Some("client".to_string())).unwrap();
+
+    if let Err(e) = state.db.register_client(&client_id, &payload.name, &token).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to register client: {}", e)).into_response();
+    }
+
+    (StatusCode::CREATED, Json(RegisterClientResponse {
+        client_id,
+        token,
+    })).into_response()
 }
 
 #[utoipa::path(
@@ -190,7 +265,13 @@ async fn handle_execute(
     Json(payload): Json<ExecuteRequest>,
 ) -> Json<ExecuteResponse> {
     let start = Instant::now();
-    let pool = &state.pool;
+    
+    // For /execute, we use 'primary' pool or the first one
+    let pool = match state.pools.get("primary").or_else(|| state.pools.values().next()) {
+        Some(p) => p,
+        None => return Json(ExecuteResponse { status: "error".to_string(), key_id: "none".to_string(), message: "No pools configured".to_string() }),
+    };
+
     let key = pool.acquire().await;
     
     let result = if let Err(e) = key.try_use() {
@@ -248,6 +329,10 @@ async fn handle_execute(
         handle_stats,
         handle_get_config,
         handle_patch_config,
+        handle_register_client,
+        handle_public_register,
+        handle_export_key,
+        handle_import_key,
     ),
     components(
         schemas(
@@ -255,6 +340,8 @@ async fn handle_execute(
             ExecuteResponse, 
             RegisterClientRequest,
             RegisterClientResponse,
+            KeyExportResponse,
+            KeyImportRequest,
             ConfigPatchRequest, 
             crate::config::AppConfig,
             crate::config::ServerConfig,
@@ -282,14 +369,15 @@ async fn handle_register_client(
     State(state): State<Arc<AppState>>,
     _token: AdminToken,
     Json(payload): Json<RegisterClientRequest>,
-) -> (StatusCode, Json<RegisterClientResponse>) {
-    let token = state.auth.generate_token(&payload.id, None).unwrap();
+) -> impl IntoResponse {
+    let client_id = payload.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let token = state.auth.generate_token(&client_id, Some("admin".to_string())).unwrap();
     
-    if let Err(e) = state.db.register_client(&payload.id, &payload.name, &token).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(RegisterClientResponse { token: format!("Error: {}", e) }));
+    if let Err(e) = state.db.register_client(&client_id, &payload.name, &token).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}", e)).into_response();
     }
 
-    (StatusCode::CREATED, Json(RegisterClientResponse { token }))
+    (StatusCode::CREATED, Json(RegisterClientResponse { client_id, token })).into_response()
 }
 
 struct SecurityAddon;
@@ -334,6 +422,102 @@ async fn handle_stats(
 
 #[utoipa::path(
     get,
+    path = "/admin/keys/{pool_name}/{key_id}",
+    params(
+        ("pool_name" = String, Path, description = "Name of the pool"),
+        ("key_id" = String, Path, description = "ID of the key")
+    ),
+    responses(
+        (status = 200, description = "Key exported successfully", body = KeyExportResponse),
+        (status = 404, description = "Key or pool not found"),
+        (status = 403, description = "Forbidden")
+    ),
+    security(("admin_key" = []))
+)]
+async fn handle_export_key(
+    State(state): State<Arc<AppState>>,
+    _token: AdminToken,
+    Path((pool_name, key_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let config = state.config.load();
+    let pool_cfg = config.pools.iter().find(|p| p.name == pool_name);
+    
+    if let Some(pool) = pool_cfg {
+        if let Some(key_cfg) = pool.keys.iter().find(|k| k.id == key_id) {
+            match state.storage.load_secret(&key_cfg.secret_name) {
+                Ok(secret) => return (StatusCode::OK, Json(KeyExportResponse { 
+                    key: key_cfg.clone(), 
+                    secret 
+                })).into_response(),
+                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load secret: {}", e)).into_response(),
+            }
+        }
+    }
+    
+    (StatusCode::NOT_FOUND, "Key or pool not found").into_response()
+}
+
+#[utoipa::path(
+    post,
+    path = "/admin/keys/{pool_name}",
+    params(
+        ("pool_name" = String, Path, description = "Name of the pool")
+    ),
+    request_body = KeyImportRequest,
+    responses(
+        (status = 201, description = "Key imported successfully"),
+        (status = 404, description = "Pool not found"),
+        (status = 403, description = "Forbidden")
+    ),
+    security(("admin_key" = []))
+)]
+async fn handle_import_key(
+    State(state): State<Arc<AppState>>,
+    _token: AdminToken,
+    Path(pool_name): Path<String>,
+    Json(payload): Json<KeyImportRequest>,
+) -> impl IntoResponse {
+    // 1. Save secret to disk
+    if let Err(e) = state.storage.save_secret(&payload.key.secret_name, &payload.secret) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to save secret: {}", e)).into_response();
+    }
+
+    // 2. Update config in memory
+    let mut new_config = (**state.config.load()).clone();
+    let pool_idx = new_config.pools.iter().position(|p| p.name == pool_name);
+    
+    if let Some(idx) = pool_idx {
+        new_config.pools[idx].keys.push(payload.key.clone());
+        
+        // 3. Persist config to disk
+        if let Err(e) = new_config.save("config.yaml") {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to save config: {}", e)).into_response();
+        }
+        
+        // 4. Update the running pool
+        if let Some(pool) = state.pools.get(&pool_name) {
+            let key = crate::core::ApiKey::new(
+                &payload.key.id,
+                payload.key.limit,
+                payload.secret,
+                payload.key.secret_type.clone(),
+                None,
+            );
+            
+            for _ in 0..payload.key.concurrency {
+                pool.add_key(key.clone()).await;
+            }
+        }
+
+        state.config.store(Arc::new(new_config));
+        (StatusCode::CREATED, "Key imported successfully").into_response()
+    } else {
+        (StatusCode::NOT_FOUND, "Pool not found").into_response()
+    }
+}
+
+#[utoipa::path(
+    get,
     path = "/config",
     responses(
         (status = 200, description = "Current application configuration", body = AppConfig),
@@ -347,6 +531,9 @@ async fn handle_get_config(
 ) -> Json<AppConfig> {
     let mut config = (**state.config.load()).clone();
     config.auth.secret = "[REDACTED]".to_string();
+    if config.auth.master_key.is_some() {
+        config.auth.master_key = Some("[REDACTED]".to_string());
+    }
     Json(config)
 }
 
@@ -355,7 +542,7 @@ async fn handle_get_config(
     path = "/config",
     request_body = ConfigPatchRequest,
     responses(
-        (status = 200, description = "Configuration updated", body = AppConfig),
+        (status = 200, description = "Configuration updated successfully", body = AppConfig),
         (status = 403, description = "Forbidden")
     ),
     security(("admin_key" = []))
@@ -379,6 +566,9 @@ async fn handle_patch_config(
     
     let mut sanitized = new_config;
     sanitized.auth.secret = "[REDACTED]".to_string();
+    if sanitized.auth.master_key.is_some() {
+        sanitized.auth.master_key = Some("[REDACTED]".to_string());
+    }
     Json(sanitized)
 }
 
@@ -429,6 +619,62 @@ async fn handle_mcp(
                 }),
             }
         },
+        "export_key" => {
+            if token.0.role.as_deref() != Some("admin") {
+                return Json(McpResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request.id,
+                    result: None,
+                    error: Some(serde_json::Value::String("Admin privileges required for export_key".to_string())),
+                });
+            }
+            let params = request.params.unwrap_or_default();
+            let pool_name = params["pool_name"].as_str().unwrap_or_default();
+            let key_id = params["key_id"].as_str().unwrap_or_default();
+            match state.mcp.export_key(pool_name, key_id).await {
+                Ok(v) => Some(v),
+                Err(e) => return Json(McpResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request.id,
+                    result: None,
+                    error: Some(serde_json::Value::String(e)),
+                }),
+            }
+        },
+        "import_key" => {
+            if token.0.role.as_deref() != Some("admin") {
+                return Json(McpResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request.id,
+                    result: None,
+                    error: Some(serde_json::Value::String("Admin privileges required for import_key".to_string())),
+                });
+            }
+            let params = request.params.unwrap_or_default();
+            let pool_name = params["pool_name"].as_str().unwrap_or_default();
+            let key_cfg_res: Result<crate::config::KeyConfig, _> = serde_json::from_value(params["key_cfg"].clone());
+            let secret = params["secret"].as_str().unwrap_or_default().to_string();
+            
+            match key_cfg_res {
+                Ok(key_cfg) => {
+                    match state.mcp.import_key(pool_name, key_cfg, secret).await {
+                        Ok(msg) => Some(serde_json::Value::String(msg)),
+                        Err(e) => return Json(McpResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id: request.id,
+                            result: None,
+                            error: Some(serde_json::Value::String(e)),
+                        }),
+                    }
+                },
+                Err(e) => return Json(McpResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request.id,
+                    result: None,
+                    error: Some(serde_json::Value::String(format!("Invalid key_cfg: {}", e))),
+                }),
+            }
+        },
         _ => None,
     };
 
@@ -458,13 +704,14 @@ async fn handle_proxy(
     }
 
     let target_base = &pool_cfg.unwrap().target_url;
+    let provider = &pool_cfg.unwrap().provider;
     let target_url = format!("{}/{}", target_base.trim_end_matches('/'), path);
 
-    // Acquire key from pool
-    // Note: We currently only support 'primary' pool in KeyPool struct. 
-    // For multiple pools, we'd need a Map of KeyPools.
-    // For now, let's assume we use the primary pool for all proxying for simplicity.
-    let pool = &state.pool;
+    // Acquire key from the specific pool
+    let pool = match state.pools.get(&pool_name) {
+        Some(p) => p,
+        None => return (StatusCode::NOT_FOUND, "Pool implementation not found").into_response(),
+    };
     let key = pool.acquire().await;
     
     // Get actual secret from storage
@@ -487,12 +734,9 @@ async fn handle_proxy(
     }
 
     // Inject our balanced key based on provider detection
-    let is_google = target_url.contains("googleapis.com");
-    let is_anthropic = target_url.contains("anthropic.com");
-
-    if is_google {
+    if provider == "google" || target_url.contains("googleapis.com") {
         req_builder = req_builder.header("x-goog-api-key", &secret);
-    } else if is_anthropic {
+    } else if provider == "anthropic" || target_url.contains("anthropic.com") {
         req_builder = req_builder.header("x-api-key", &secret);
         req_builder = req_builder.header("anthropic-version", "2023-06-01");
     } else {

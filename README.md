@@ -23,8 +23,10 @@ _Secure, Scalable, and MCP-ready._
 - **Observability**: Detailed request logging for analytics, latency tracking, and error auditing.
 - **Admin Protection**: Dedicated administrative layer secured via `.env` secrets and `X-Admin-Key` headers.
 - **Client Isolation**: Strict partitioning ensures clients only see and access their assigned pools.
-- **OAuth 2.1 & TTL**: Mandatory token validation with support for temporary keys (TTL).
-- **MCP Enabled**: Integrated Model Context Protocol server for AI-driven pool management.
+- **Transparent Proxy**: Automatic header injection for OpenAI, Anthropic, and Google Gemini providers.
+- **OAuth 2.1 & Hybrid Auth**: Mandatory token validation with Master Key and Public Registration options.
+- **Dynamic Key Management**: Export/Import provider keys via API with zero-downtime persistence.
+- **MCP Enabled**: Integrated Model Context Protocol server with advanced key management tools.
 - **Interactive Documentation**: Premium API explorer via **Scalar** available at `/scalar`.
 - **Graceful Shutdown**: Proper signal handling (Ctrl+C) for clean termination and resource cleanup.
 - **Dynamic Configuration**: Hot-reloading of configuration via `ArcSwap` and secure API.
@@ -114,7 +116,9 @@ cargo run
 _The server will display a professional ASCII banner and provide links to the API and documentation._
 
 ### 5. Client Registration (Admin)
+
 To register a new client and generate an API key (JWT):
+
 ```bash
 curl -X POST http://127.0.0.1:8080/admin/clients \
      -H "X-Admin-Key: your-admin-secret" \
@@ -123,9 +127,11 @@ curl -X POST http://127.0.0.1:8080/admin/clients \
 ```
 
 ### 6. Local Usage (No Auth)
+
 For local or private usage, you can disable authentication in `config.yaml`. In this mode, all requests are automatically granted **Admin** privileges.
 
 ### 7. Interactive Testing
+
 Once the server is running, visit:
 
 - **Scalar UI**: `http://127.0.0.1:8080/scalar` (Interactive API explorer)
@@ -140,9 +146,13 @@ Once the server is running, visit:
 | Method  | Endpoint   | Description                      | Auth Required      |
 | :------ | :--------- | :------------------------------- | :----------------- |
 | `POST`  | `/execute` | Run a task through the balancer  | OAuth 2.1 (Client) |
+| `ANY`   | `/proxy/:pool/*path` | Transparent provider proxy | OAuth 2.1 / Master |
+| `POST`  | `/auth/register` | Self-service client registration | Public (Optional) |
 | `GET`   | `/stats`   | View real-time DB analytics      | Admin Key          |
 | `GET`   | `/config`  | View current configuration       | Admin Key          |
 | `PATCH` | `/config`  | Update configuration dynamically | Admin Key          |
+| `GET`   | `/admin/keys/:pool/:id` | Export key with secret | Admin Key |
+| `POST`  | `/admin/keys/:pool` | Import new key dynamically | Admin Key |
 | `POST`  | `/mcp`     | MCP JSON-RPC interface           | OAuth 2.1 / Admin  |
 
 ### MCP (Model Context Protocol)
@@ -153,6 +163,24 @@ The balancer exposes an MCP-compliant endpoint at `/mcp` (JSON-RPC 2.0).
 
 - `list_pools`: Returns a list of pools with their descriptions.
 - `update_description`: Allows an agent to update a pool's description.
+- `export_key`: Retrieve a key's secret by its ID (Admin only).
+- `import_key`: Dynamically add a new key to a running pool (Admin only).
+
+---
+
+## 🧪 Testing (E2E)
+
+The project includes a comprehensive suite of tests to ensure stability and security:
+
+### Python E2E & Stress Tests
+- `tests/execute_e2e_concurrent.py`: Advanced stress-test for 30+ concurrent connections and pool isolation.
+- `tests/execute_e2e.py`: Basic end-to-end verification of the request lifecycle.
+- `tests/test_dynamic_keys.py`: Verifies hot-swapping and persistence of provider keys via API.
+- `tests/test_mcp.py`: Validates the MCP JSON-RPC toolchain and agent interactions.
+- `tests/mock_providers.py`: A local mock server used to simulate external AI provider responses.
+
+### Rust Integration Tests
+- `tests/security_tests.rs`: Native Rust integration tests focusing on authentication and authorization logic.
 
 ---
 
