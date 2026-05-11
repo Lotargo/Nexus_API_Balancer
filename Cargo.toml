@@ -24,3 +24,6 @@ dotenvy = "0.15"
 utoipa = { version = "5.5", features = ["axum_extras", "chrono"] }
 utoipa-scalar = { version = "0.2", features = ["axum"] }
 tiktoken-rs = "0.6"
+
+[dev-dependencies]
+tempfile = "3.27.0"

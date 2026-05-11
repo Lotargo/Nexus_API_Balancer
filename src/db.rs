@@ -1,5 +1,6 @@
 use sqlx::{sqlite::{SqlitePoolOptions, SqliteConnectOptions}, SqlitePool};
 use std::str::FromStr;
+use std::collections::HashMap;
 use anyhow::Result;
 use serde::{Serialize, Deserialize};
 use utoipa::ToSchema;
@@ -80,6 +81,7 @@ impl Database {
             "CREATE TABLE IF NOT EXISTS client_pools (
                 client_id TEXT NOT NULL,
                 pool_id TEXT NOT NULL,
+                kv_cache BOOLEAN NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (client_id, pool_id)
             )"
@@ -87,6 +89,20 @@ impl Database {
         .execute(pool)
         .await?;
 
+        Ok(())
+    }
+
+    pub async fn set_pool_kv_cache(&self, client_id: &str, pool_id: &str, enabled: bool) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO client_pools (client_id, pool_id, kv_cache) 
+             VALUES (?, ?, ?)
+             ON CONFLICT(client_id, pool_id) DO UPDATE SET kv_cache = excluded.kv_cache"
+        )
+        .bind(client_id)
+        .bind(pool_id)
+        .bind(enabled)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -142,6 +158,17 @@ impl Database {
         .await?;
 
         Ok(pools)
+    }
+
+    pub async fn get_allowed_pools_ext(&self, client_id: &str) -> Result<HashMap<String, bool>> {
+        let rows: Vec<(String, bool)> = sqlx::query_as(
+            "SELECT pool_id, kv_cache FROM client_pools WHERE client_id = ?"
+        )
+        .bind(client_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().collect())
     }
 
     pub async fn register_client(&self, id: &str, name: &str, token: &str) -> Result<()> {

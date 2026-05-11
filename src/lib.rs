@@ -29,23 +29,38 @@ pub async fn run_server(config: AppConfig, db: Database, storage_path: &str) -> 
     for pool_cfg in &config.pools {
         let pool = KeyPool::new(pool_cfg.capacity);
         for key_cfg in &pool_cfg.keys {
-            let secret = storage.load_secret(&key_cfg.secret_name)?;
-            let key = ApiKey::new(
-                &key_cfg.id,
-                key_cfg.rps_limit,
-                key_cfg.rpd_limit,
-                key_cfg.tpm_limit,
-                key_cfg.tpd_limit,
-                key_cfg.max_request_tokens,
-                key_cfg.cooldown_on_limit.unwrap_or(false),
-                secret,
-                key_cfg.secret_type.clone(),
-                None,
-            );
-            for _ in 0..key_cfg.concurrency {
-                if let Err(e) = pool.add_key(key.clone()) {
-                    eprintln!("Warning: Pool '{}' reached capacity during init: {}", pool_cfg.name, e);
-                    break;
+            let secret_content = storage.load_secret(&key_cfg.secret_name)?;
+            // Support multiple keys per file (one per line)
+            let individual_secrets: Vec<&str> = secret_content.lines()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let individual_secrets_count = individual_secrets.len();
+
+            for (idx, secret) in individual_secrets.into_iter().enumerate() {
+                let unique_id = if idx == 0 && individual_secrets_count == 1 {
+                    key_cfg.id.clone()
+                } else {
+                    format!("{}#{}", key_cfg.id, idx + 1)
+                };
+                
+                let key = ApiKey::new(
+                    &unique_id,
+                    key_cfg.rps_limit,
+                    key_cfg.rpd_limit,
+                    key_cfg.tpm_limit,
+                    key_cfg.tpd_limit,
+                    key_cfg.max_request_tokens,
+                    key_cfg.cooldown_on_limit.unwrap_or(false),
+                    secret.to_string(),
+                    key_cfg.secret_type.clone(),
+                    None,
+                );
+                for _ in 0..key_cfg.concurrency {
+                    if let Err(e) = pool.add_key(key.clone()) {
+                        eprintln!("Warning: Pool '{}' reached capacity during init: {}", pool_cfg.name, e);
+                        break;
+                    }
                 }
             }
         }

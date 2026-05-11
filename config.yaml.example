@@ -1,17 +1,36 @@
 server:
   host: "127.0.0.1"
-  port: 8080
+  port: 3000
 
 auth:
   enabled: true
   public_registration: false
+  # Used for client authentication (X-Nexus-Master-Key)
   master_key: "nexus-master-key-2026"
+  # Used for administrative tasks (X-Admin-Key)
   admin_key: "admin-secret-key-2026"
   secret: "change-this-to-a-secure-random-string"
   issuer: "nexus-balancer"
   audience: "api-clients"
 
 pools:
+  - name: "api-gemini-pool"
+    description: "Gemini proxy pool with v1beta and KV Cache support"
+    provider: "gemini"
+    # Base URL for Gemini. Versioning (v1/v1beta) is managed by the balancer.
+    target_url: "https://generativelanguage.googleapis.com"
+    capacity: 20
+    keys:
+      - id: "GEMINI_KEY"
+        # Support for multi-key files: Nexus will automatically split keys 
+        # from a single file (one per line) and assign unique IDs like GEMINI_KEY#1
+        secret_name: "gemini_keys.txt"
+        secret_type: "api_key"
+        concurrency: 2
+        rps_limit: null
+        tpm_limit: null
+        cooldown_on_limit: true
+
   - name: "openai-pool"
     description: "OpenAI-compatible proxy pool"
     provider: "openai"
@@ -19,29 +38,10 @@ pools:
     capacity: 20
     keys:
       - id: "OPENAI_KEY_1"
-        rps_limit: 10
-        rpd_limit: null
-        tpm_limit: 60000
-        tpd_limit: null
-        max_request_tokens: 16000
-        cooldown_on_limit: true
-        concurrency: 5
         secret_name: "openai_key_1"
         secret_type: "api_key"
-
-  - name: "gemini-pool"
-    description: "Gemini proxy pool with generateContent and SSE support"
-    provider: "google"
-    target_url: "https://generativelanguage.googleapis.com/v1beta"
-    capacity: 10
-    keys:
-      - id: "GEMINI_KEY_1"
-        rps_limit: 5
-        rpd_limit: null
-        tpm_limit: 30000
-        tpd_limit: null
+        concurrency: 5
+        rps_limit: 10
+        tpm_limit: 60000
         max_request_tokens: 16000
         cooldown_on_limit: true
-        concurrency: 2
-        secret_name: "gemini_key_1"
-        secret_type: "api_key"
