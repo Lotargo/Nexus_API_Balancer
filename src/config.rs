@@ -14,6 +14,7 @@ pub struct AuthConfig {
     pub enabled: bool,
     pub public_registration: bool,
     pub master_key: Option<String>,
+    pub admin_key: Option<String>,
     pub secret: String,
     pub issuer: String,
     pub audience: String,

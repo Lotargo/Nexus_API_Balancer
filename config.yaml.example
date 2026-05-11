@@ -6,6 +6,7 @@ auth:
   enabled: true
   public_registration: false
   master_key: "nexus-master-key-2026"
+  admin_key: "admin-secret-key-2026"
   secret: "change-this-to-a-secure-random-string"
   issuer: "nexus-balancer"
   audience: "api-clients"

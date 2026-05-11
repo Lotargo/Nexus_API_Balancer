@@ -208,7 +208,10 @@ where
         
         // 1. Check for X-Admin-Key (Bypass for admin)
         let admin_header = parts.headers.get("X-Admin-Key").and_then(|h| h.to_str().ok());
-        let admin_secret = std::env::var("ADMIN_API_KEY").unwrap_or_else(|_| "change-me".to_string());
+        let admin_secret = config.auth.admin_key.clone()
+            .or_else(|| std::env::var("ADMIN_API_KEY").ok())
+            .unwrap_or_else(|| "admin-secret-key-2026".to_string());
+
 
         if let Some(key) = admin_header {
             if key == admin_secret {
