@@ -108,7 +108,7 @@ impl BalancerMcpServer {
                 None,
             );
             for _ in 0..key_cfg.concurrency {
-                pool.add_key(key.clone()).await;
+                let _ = pool.add_key(key.clone());
             }
         }
 

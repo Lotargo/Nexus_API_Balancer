@@ -505,7 +505,9 @@ async fn handle_import_key(
             );
             
             for _ in 0..payload.key.concurrency {
-                pool.add_key(key.clone()).await;
+                if let Err(e) = pool.add_key(key.clone()) {
+                    return (StatusCode::BAD_REQUEST, format!("Failed to inject key into running pool: {}", e)).into_response();
+                }
             }
         }
 
