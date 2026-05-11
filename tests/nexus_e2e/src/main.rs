@@ -5,14 +5,20 @@ use tokio::task;
 use axum::{routing::post, Json, Router, http::HeaderMap};
 use std::net::SocketAddr;
 use nexus_balancer::{run_server, config::AppConfig, db::Database};
+use futures::StreamExt;
 
 const BALANCER_URL: &str = "http://127.0.0.1:3000";
 const MASTER_KEY: &str = "nexus-master-key-2024";
-const ADMIN_KEY: &str = "admin-secret-key-2024";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
+    let admin_key = std::env::var("ADMIN_API_KEY").unwrap_or_else(|_| "admin-secret-key-2024".to_string());
+    let gemini_real_key = std::env::var("GEMINI_REAL_API_KEY").ok();
+
+    if let Some(secret) = &gemini_real_key {
+        std::fs::write("../../secrets/gemini_real_key", secret)?;
+    }
 
     // 1. Start Mock Provider
     tokio::spawn(async {
@@ -25,7 +31,12 @@ async fn main() -> anyhow::Result<()> {
     // 2. Start Balancer inside the test
     tokio::spawn(async {
         let config = AppConfig::load("../../config.yaml").unwrap();
-        let db = Database::new("sqlite::memory:").await.unwrap(); 
+        let db_path = std::env::current_dir().unwrap().join("nexus-e2e.db");
+        if db_path.exists() {
+            let _ = std::fs::remove_file(&db_path);
+        }
+        let db_url = format!("sqlite:{}", db_path.to_string_lossy().replace('\\', "/"));
+        let db = Database::new(&db_url).await.unwrap();
         run_server(config, db, "../../secrets").await.unwrap();
     });
 
@@ -34,6 +45,9 @@ async fn main() -> anyhow::Result<()> {
 
     let client = Client::builder()
         .timeout(Duration::from_secs(5))
+        .build()?;
+    let real_client = Client::builder()
+        .timeout(Duration::from_secs(30))
         .build()?;
 
     // --- TEST 1: Concurrency & Isolation ---
@@ -77,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
         "secret": "sk-strict-123"
     });
     client.post(format!("{}/admin/keys/limit-pool", BALANCER_URL))
-        .header("X-Admin-Key", ADMIN_KEY)
+        .header("X-Admin-Key", &admin_key)
         .json(&rps_key).send().await?;
 
     // Send 5 rapid requests (should hit 429)
@@ -104,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
     
     // Check stats
     let stats_resp = client.get(format!("{}/stats", BALANCER_URL))
-        .header("X-Admin-Key", ADMIN_KEY)
+        .header("X-Admin-Key", &admin_key)
         .send().await?;
     let stats: Value = stats_resp.json().await?;
     println!("Stats: {}", stats);
@@ -117,18 +131,46 @@ async fn main() -> anyhow::Result<()> {
             "parts": [{"text": "Hello, how are you?"}]
         }]
     });
-    let gemini_resp = client.post(format!("{}/proxy/gemini-real", BALANCER_URL))
+    let gemini_resp = real_client.post(format!("{}/proxy/gemini-real/models/gemini-flash-lite-latest:generateContent", BALANCER_URL))
         .header("Authorization", format!("Bearer {}", MASTER_KEY))
         .json(&gemini_payload)
         .send().await?;
-    
+
     if gemini_resp.status() == 200 {
         let body: Value = gemini_resp.json().await?;
         println!("Gemini Response OK. Tokens used: {:?}", body.get("usageMetadata"));
-        
-        // Final stats check
+
+        let stream_resp = real_client.post(format!("{}/proxy/gemini-real/models/gemini-flash-lite-latest:streamGenerateContent?alt=sse", BALANCER_URL))
+            .header("Authorization", format!("Bearer {}", MASTER_KEY))
+            .json(&gemini_payload)
+            .send().await?;
+
+        assert_eq!(stream_resp.status(), 200, "Gemini SSE request failed");
+        let content_type = stream_resp.headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(content_type.starts_with("text/event-stream"), "Expected SSE content type, got {}", content_type);
+
+        let mut stream = stream_resp.bytes_stream();
+        let mut collected = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            collected.extend_from_slice(&chunk);
+            let text = String::from_utf8_lossy(&collected);
+            if text.contains("usageMetadata") && text.contains("\n\n") {
+                break;
+            }
+        }
+
+        let sse_text = String::from_utf8_lossy(&collected);
+        assert!(sse_text.contains("data:"), "SSE response did not contain data frames");
+        assert!(sse_text.contains("usageMetadata") || sse_text.contains("candidates"), "SSE response did not contain Gemini payload");
+        println!("Gemini SSE Response OK. First frames:\n{}", sse_text);
+
         let final_stats: Value = client.get(format!("{}/stats", BALANCER_URL))
-            .header("X-Admin-Key", ADMIN_KEY)
+            .header("X-Admin-Key", &admin_key)
             .send().await?.json().await?;
         println!("Final Stats: {}", final_stats);
     } else {
@@ -136,6 +178,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     println!("\n--- [PASSED] All Tests (including Real Gemini) Completed ---");
+    if gemini_real_key.is_some() {
+        let _ = std::fs::remove_file("../../secrets/gemini_real_key");
+    }
     Ok(())
 }
 

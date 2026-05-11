@@ -1,7 +1,7 @@
 use tokio::time::{Instant};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use reqwest::{Client, StatusCode};
+use reqwest::Client;
 use serde_json::json;
 use jsonwebtoken::{encode, Header, EncodingKey};
 use std::time::{SystemTime, UNIX_EPOCH};

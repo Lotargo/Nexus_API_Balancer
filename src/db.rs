@@ -41,8 +41,53 @@ impl Database {
 
         // Run migrations
         sqlx::migrate!("./migrations").run(&pool).await?;
+        Self::ensure_schema(&pool).await?;
 
         Ok(Self { pool })
+    }
+
+    async fn ensure_schema(pool: &SqlitePool) -> Result<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS request_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_id TEXT,
+                key_id TEXT,
+                pool_id TEXT,
+                status TEXT NOT NULL,
+                latency_ms INTEGER,
+                tokens_used INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT,
+                request_ip TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS clients (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                auth_token TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS client_pools (
+                client_id TEXT NOT NULL,
+                pool_id TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (client_id, pool_id)
+            )"
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(())
     }
 
     pub async fn log_request(&self, entry: LogEntry) -> Result<()> {

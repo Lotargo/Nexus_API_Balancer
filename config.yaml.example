@@ -1,40 +1,46 @@
-# Nexus API Balancer Configuration Example
-
 server:
   host: "127.0.0.1"
   port: 8080
 
 auth:
-  # Set to false for local usage (grants admin rights to all requests if no master key)
   enabled: true
-  # Allow anyone to register themselves via /auth/register
   public_registration: false
-  # Optional: Universal master key that grants admin access to anyone who knows it
   master_key: "nexus-master-key-2024"
-  # Shared secret for signing/validating JWT tokens
   secret: "change-this-to-a-secure-random-string"
   issuer: "nexus-balancer"
   audience: "api-clients"
 
 pools:
-  - name: "primary"
-    description: "Main search pool for high-priority AI queries"
-    # The official API base URL of the provider (e.g., OpenAI, Gemini, Anthropic)
+  - name: "openai-pool"
+    description: "OpenAI-compatible proxy pool"
+    provider: "openai"
     target_url: "https://api.openai.com"
     capacity: 20
     keys:
-      - id: "PRO_PLAN_KEY_1"
-        # Requests per second (RPS) limit for this specific key
-        limit: 10
-        # Number of concurrent slots this key can occupy in the pool
+      - id: "OPENAI_KEY_1"
+        rps_limit: 10
+        rpd_limit: null
+        tpm_limit: 60000
+        tpd_limit: null
+        max_request_tokens: 16000
+        cooldown_on_limit: true
         concurrency: 5
-        # Name of the file in the 'secrets' directory containing the actual key
-        secret_name: "pro_key_1"
-        # Type for documentation and logic (e.g., api_key, connection_string)
+        secret_name: "openai_key_1"
         secret_type: "api_key"
-      
-      - id: "FREE_TIER_KEY"
-        limit: 1
-        concurrency: 1
-        secret_name: "free_key"
+
+  - name: "gemini-pool"
+    description: "Gemini proxy pool with generateContent and SSE support"
+    provider: "google"
+    target_url: "https://generativelanguage.googleapis.com/v1beta"
+    capacity: 10
+    keys:
+      - id: "GEMINI_KEY_1"
+        rps_limit: 5
+        rpd_limit: null
+        tpm_limit: 30000
+        tpd_limit: null
+        max_request_tokens: 16000
+        cooldown_on_limit: true
+        concurrency: 2
+        secret_name: "gemini_key_1"
         secret_type: "api_key"
