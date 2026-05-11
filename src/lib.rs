@@ -68,7 +68,10 @@ pub async fn run_server(config: AppConfig, db: Database, storage_path: &str) -> 
 
     let auth_manager = AuthManager::new(config.auth.clone());
     let app = api::create_router(pools, auth_manager, shared_config, db, storage)
-        .merge(Scalar::with_url("/scalar", ApiDoc::openapi()));
+        .merge(Scalar::with_url("/scalar", ApiDoc::openapi()))
+        .layer(
+            tower_http::cors::CorsLayer::permissive()
+        );
     
     let addr_str = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr_str).await?;
