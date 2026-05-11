@@ -30,6 +30,11 @@ pools:
     concurrency: 3
     secret_name: mcp_secret_file
     secret_type: api_key
+  - id: RUST_DYNAMIC_KEY
+    limit: 100
+    concurrency: 2
+    secret_name: rust_secret_file
+    secret_type: api_key
 - name: gemini-pool
   description: Mock Gemini Pool
   provider: google
