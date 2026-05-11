@@ -12,6 +12,8 @@ pub struct ServerConfig {
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct AuthConfig {
     pub enabled: bool,
+    pub public_registration: bool,
+    pub master_key: Option<String>,
     pub secret: String,
     pub issuer: String,
     pub audience: String,
@@ -30,6 +32,7 @@ pub struct KeyConfig {
 pub struct PoolConfig {
     pub name: String,
     pub description: Option<String>,
+    pub provider: String,
     pub target_url: String,
     pub capacity: usize,
     pub keys: Vec<KeyConfig>,
@@ -47,5 +50,11 @@ impl AppConfig {
         let content = fs::read_to_string(path)?;
         let config: AppConfig = serde_yaml::from_str(&content)?;
         Ok(config)
+    }
+
+    pub fn save(&self, path: &str) -> Result<()> {
+        let content = serde_yaml::to_string(self)?;
+        fs::write(path, content)?;
+        Ok(())
     }
 }

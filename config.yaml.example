@@ -5,8 +5,12 @@ server:
   port: 8080
 
 auth:
-  # Set to false for local usage (grants admin rights to all requests)
+  # Set to false for local usage (grants admin rights to all requests if no master key)
   enabled: true
+  # Allow anyone to register themselves via /auth/register
+  public_registration: false
+  # Optional: Universal master key that grants admin access to anyone who knows it
+  master_key: "nexus-master-key-2024"
   # Shared secret for signing/validating JWT tokens
   secret: "change-this-to-a-secure-random-string"
   issuer: "nexus-balancer"

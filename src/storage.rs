@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use anyhow::{Context, Result};
 
+#[derive(Clone)]
 pub struct SecretStorage {
     base_path: PathBuf,
 }
@@ -19,6 +20,13 @@ impl SecretStorage {
         let path = self.base_path.join(name);
         let secret = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read secret file: {:?}", path))?;
-        Ok(secret.trim().to_string())
+        Ok(secret.trim_start_matches('\u{feff}').trim().to_string())
+    }
+
+    pub fn save_secret(&self, name: &str, secret: &str) -> Result<()> {
+        let path = self.base_path.join(name);
+        fs::write(&path, secret)
+            .with_context(|| format!("Failed to write secret file: {:?}", path))?;
+        Ok(())
     }
 }

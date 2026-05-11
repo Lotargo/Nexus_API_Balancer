@@ -11,6 +11,7 @@ use crate::config::AppConfig;
 use crate::storage::SecretStorage;
 use crate::core::{ApiKey, KeyPool};
 use crate::auth::AuthManager;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use std::sync::Arc;
@@ -38,29 +39,33 @@ async fn main() -> Result<()> {
     let storage = SecretStorage::new("secrets");
 
     // 3. Initialize Pools
-    let pool_config = &config.pools[0];
-    let pool = KeyPool::new(pool_config.capacity);
+    let mut pools = HashMap::new();
 
-    for key_cfg in &pool_config.keys {
-        let secret = storage.load_secret(&key_cfg.secret_name)?;
-        let key = ApiKey::new(
-            &key_cfg.id,
-            key_cfg.limit,
-            secret,
-            key_cfg.secret_type.clone(),
-            None,
-        );
+    for pool_cfg in &config.pools {
+        let pool = KeyPool::new(pool_cfg.capacity);
 
-        for _ in 0..key_cfg.concurrency {
-            pool.add_key(key.clone()).await;
+        for key_cfg in &pool_cfg.keys {
+            let secret = storage.load_secret(&key_cfg.secret_name)?;
+            let key = ApiKey::new(
+                &key_cfg.id,
+                key_cfg.limit,
+                secret,
+                key_cfg.secret_type.clone(),
+                None,
+            );
+
+            for _ in 0..key_cfg.concurrency {
+                pool.add_key(key.clone()).await;
+            }
         }
+        pools.insert(pool_cfg.name.clone(), pool);
     }
 
     // 4. Initialize Auth
     let auth_manager = AuthManager::new(config.auth.clone());
 
     // 5. Start REST API
-    let app = api::create_router(pool, auth_manager, shared_config, db)
+    let app = api::create_router(pools, auth_manager, shared_config, db, storage)
         .merge(Scalar::with_url("/scalar", ApiDoc::openapi()));
     let addr = SocketAddr::from(([127, 0, 0, 1], config.server.port));
     
@@ -72,11 +77,11 @@ async fn main() -> Result<()> {
    |_| \_|\___/_/\_\\__,_|___/ |____/ \__,_|_|\__,_|_| |_|\___\___|_|   
                                                                          
    ----------------------------------------------------------------------
-    Status:  🚀 Running
+    Status:  Running
     Address: http://{}
-    Storage: 💾 SQLite (nexus.db)
-    MCP:     ⚡ Enabled
-    Docs:    📜 http://{}/scalar
+    Storage: SQLite (nexus.db)
+    MCP:     Enabled
+    Docs:    http://{}/scalar
    ----------------------------------------------------------------------
     "#, addr, addr);
     
