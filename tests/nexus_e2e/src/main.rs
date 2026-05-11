@@ -12,12 +12,11 @@ const BALANCER_URL: &str = "http://127.0.0.1:3000";
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
-    let admin_key = std::env::var("ADMIN_API_KEY").unwrap_or_else(|_| "admin-secret-key-2024".to_string());
-
-
-    // Load config to get master_key
+    // Load config to get keys
     let config = AppConfig::load("../../config.yaml").expect("Failed to load config.yaml");
     let master_key = config.auth.master_key.as_deref().expect("Master key must be set in config.yaml");
+    let admin_key = config.auth.admin_key.as_deref().expect("Admin key must be set in config.yaml");
+
 
 
     // 1. Start Mock Provider
