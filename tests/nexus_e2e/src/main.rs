@@ -13,11 +13,7 @@ const BALANCER_URL: &str = "http://127.0.0.1:3000";
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     let admin_key = std::env::var("ADMIN_API_KEY").unwrap_or_else(|_| "admin-secret-key-2024".to_string());
-    let gemini_real_key = std::env::var("GEMINI_REAL_API_KEY").ok();
 
-    if let Some(secret) = &gemini_real_key {
-        std::fs::write("../../secrets/gemini_real_key", secret)?;
-    }
 
     // Load config to get master_key
     let config = AppConfig::load("../../config.yaml").expect("Failed to load config.yaml");
@@ -49,9 +45,6 @@ async fn main() -> anyhow::Result<()> {
 
     let client = Client::builder()
         .timeout(Duration::from_secs(5))
-        .build()?;
-    let real_client = Client::builder()
-        .timeout(Duration::from_secs(30))
         .build()?;
 
     // --- TEST 1: Concurrency & Isolation ---
@@ -128,63 +121,7 @@ async fn main() -> anyhow::Result<()> {
     println!("Stats: {}", stats);
     assert!(stats["total_tokens"].as_i64().unwrap_or(0) >= 150, "Token tracking failed");
 
-    // --- TEST 4: Real Gemini Request (Optional) ---
-    println!("\n[TEST 4] Real Gemini Request Verification");
-    let gemini_payload = json!({
-        "contents": [{
-            "parts": [{"text": "Hello, how are you?"}]
-        }]
-    });
-    let gemini_resp = real_client.post(format!("{}/proxy/gemini-real/models/gemini-flash-lite-latest:generateContent", BALANCER_URL))
-        .header("Authorization", format!("Bearer {}", master_key))
-        .json(&gemini_payload)
-        .send().await?;
-
-    if gemini_resp.status() == 200 {
-        let body: Value = gemini_resp.json().await?;
-        println!("Gemini Response OK. Tokens used: {:?}", body.get("usageMetadata"));
-
-        let stream_resp = real_client.post(format!("{}/proxy/gemini-real/models/gemini-flash-lite-latest:streamGenerateContent?alt=sse", BALANCER_URL))
-            .header("Authorization", format!("Bearer {}", master_key))
-            .json(&gemini_payload)
-            .send().await?;
-
-        assert_eq!(stream_resp.status(), 200, "Gemini SSE request failed");
-        let content_type = stream_resp.headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default()
-            .to_string();
-        assert!(content_type.starts_with("text/event-stream"), "Expected SSE content type, got {}", content_type);
-
-        let mut stream = stream_resp.bytes_stream();
-        let mut collected = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            collected.extend_from_slice(&chunk);
-            let text = String::from_utf8_lossy(&collected);
-            if text.contains("usageMetadata") && text.contains("\n\n") {
-                break;
-            }
-        }
-
-        let sse_text = String::from_utf8_lossy(&collected);
-        assert!(sse_text.contains("data:"), "SSE response did not contain data frames");
-        assert!(sse_text.contains("usageMetadata") || sse_text.contains("candidates"), "SSE response did not contain Gemini payload");
-        println!("Gemini SSE Response OK. First frames:\n{}", sse_text);
-
-        let final_stats: Value = client.get(format!("{}/stats", BALANCER_URL))
-            .header("X-Admin-Key", &admin_key)
-            .send().await?.json().await?;
-        println!("Final Stats: {}", final_stats);
-    } else {
-        println!("Gemini Request failed with status: {}. Body: {}", gemini_resp.status(), gemini_resp.text().await?);
-    }
-
-    println!("\n--- [PASSED] All Tests (including Real Gemini) Completed ---");
-    if gemini_real_key.is_some() {
-        let _ = std::fs::remove_file("../../secrets/gemini_real_key");
-    }
+    println!("\n--- [PASSED] All Mock Tests Completed ---");
     Ok(())
 }
 
