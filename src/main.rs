@@ -28,11 +28,12 @@ async fn main() -> Result<()> {
 
     println!("   {}----------------------------------------------------------------------{}", blue, reset);
     println!("    Status:  {}Running{}", green, reset);
-    println!("    Address: {}http://{}:{}{}", bold, config.server.host, config.server.port, reset);
+    let display_host = if config.server.host == "0.0.0.0" { "localhost" } else { &config.server.host };
+    println!("    Address: {}http://{}:{}{}", bold, display_host, config.server.port, reset);
     let db_name = db_url.split(':').last().unwrap_or("nexus.db");
     println!("    Storage: SQLite ({})", db_name);
     println!("    MCP:     {}Enabled{}", yellow, reset);
-    println!("    Docs:    {}http://{}:{}/scalar{}", bold, config.server.host, config.server.port, reset);
+    println!("    Docs:    {}http://{}:{}/scalar{}", bold, display_host, config.server.port, reset);
     println!("   {}----------------------------------------------------------------------{}", blue, reset);
 
     run_server(config, db, "secrets").await

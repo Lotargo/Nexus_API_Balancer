@@ -14,7 +14,6 @@ use crate::core::{ApiKey, KeyPool};
 use crate::auth::AuthManager;
 use crate::db::Database;
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use arc_swap::ArcSwap;
 use utoipa::OpenApi;
@@ -71,8 +70,8 @@ pub async fn run_server(config: AppConfig, db: Database, storage_path: &str) -> 
     let app = api::create_router(pools, auth_manager, shared_config, db, storage)
         .merge(Scalar::with_url("/scalar", ApiDoc::openapi()));
     
-    let addr = SocketAddr::from(([127, 0, 0, 1], config.server.port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let addr_str = format!("{}:{}", config.server.host, config.server.port);
+    let listener = tokio::net::TcpListener::bind(&addr_str).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
             tokio::signal::ctrl_c()
