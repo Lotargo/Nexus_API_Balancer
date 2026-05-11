@@ -100,7 +100,7 @@ Example OpenAI-compatible call:
 
 ```bash
 curl -X POST http://127.0.0.1:3000/proxy/openai-pool/v1/chat/completions \
-  -H "Authorization: Bearer nexus-master-key-2024" \
+  -H "Authorization: Bearer nexus-master-key-2026" \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}]}'
 ```
@@ -109,7 +109,7 @@ Example Gemini SSE call:
 
 ```bash
 curl -N -X POST "http://127.0.0.1:3000/proxy/gemini-pool/models/gemini-flash-lite-latest:streamGenerateContent?alt=sse" \
-  -H "Authorization: Bearer nexus-master-key-2024" \
+  -H "Authorization: Bearer nexus-master-key-2026" \
   -H "Content-Type: application/json" \
   -d '{"contents":[{"parts":[{"text":"Say hello in one sentence"}]}]}'
 ```

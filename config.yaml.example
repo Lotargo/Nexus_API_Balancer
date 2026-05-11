@@ -5,7 +5,7 @@ server:
 auth:
   enabled: true
   public_registration: false
-  master_key: "nexus-master-key-2024"
+  master_key: "nexus-master-key-2026"
   secret: "change-this-to-a-secure-random-string"
   issuer: "nexus-balancer"
   audience: "api-clients"

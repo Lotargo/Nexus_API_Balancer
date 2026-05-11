@@ -8,7 +8,6 @@ use nexus_balancer::{run_server, config::AppConfig, db::Database};
 use futures::StreamExt;
 
 const BALANCER_URL: &str = "http://127.0.0.1:3000";
-const MASTER_KEY: &str = "nexus-master-key-2024";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -20,6 +19,11 @@ async fn main() -> anyhow::Result<()> {
         std::fs::write("../../secrets/gemini_real_key", secret)?;
     }
 
+    // Load config to get master_key
+    let config = AppConfig::load("../../config.yaml").expect("Failed to load config.yaml");
+    let master_key = config.auth.master_key.as_deref().expect("Master key must be set in config.yaml");
+
+
     // 1. Start Mock Provider
     tokio::spawn(async {
         let app = Router::new().route("/*path", post(handle_mock_request));
@@ -29,15 +33,15 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // 2. Start Balancer inside the test
-    tokio::spawn(async {
-        let config = AppConfig::load("../../config.yaml").unwrap();
+    let server_config = config.clone();
+    tokio::spawn(async move {
         let db_path = std::env::current_dir().unwrap().join("nexus-e2e.db");
         if db_path.exists() {
             let _ = std::fs::remove_file(&db_path);
         }
         let db_url = format!("sqlite:{}", db_path.to_string_lossy().replace('\\', "/"));
         let db = Database::new(&db_url).await.unwrap();
-        run_server(config, db, "../../secrets").await.unwrap();
+        run_server(server_config, db, "../../secrets").await.unwrap();
     });
 
     println!("--- Waiting for internal servers to start ---");
@@ -61,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
         let c = client.clone();
         handles.push(task::spawn(async move {
             let resp = c.post(format!("{}/proxy/{}/v1/test", BALANCER_URL, pool))
-                .header("Authorization", format!("Bearer {}", MASTER_KEY))
+                .header("Authorization", format!("Bearer {}", master_key))
                 .json(&json!({"id": i}))
                 .send().await;
             match resp {
@@ -98,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
     let mut rps_hits = 0;
     for _ in 0..5 {
         let r = client.post(format!("{}/proxy/limit-pool/test", BALANCER_URL))
-            .header("Authorization", format!("Bearer {}", MASTER_KEY))
+            .header("Authorization", format!("Bearer {}", master_key))
             .json(&json!({}))
             .send().await?;
         if r.status() == 429 { rps_hits += 1; }
@@ -110,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
     // --- TEST 3: Token Tracking ---
     println!("\n[TEST 3] Token Tracking Verification");
     let token_resp = client.post(format!("{}/proxy/openai-pool/v1/completions", BALANCER_URL))
-        .header("Authorization", format!("Bearer {}", MASTER_KEY))
+        .header("Authorization", format!("Bearer {}", master_key))
         .json(&json!({"prompt": "hello", "mock_usage": 150})) // Our mock will use this
         .send().await?;
     
@@ -132,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
         }]
     });
     let gemini_resp = real_client.post(format!("{}/proxy/gemini-real/models/gemini-flash-lite-latest:generateContent", BALANCER_URL))
-        .header("Authorization", format!("Bearer {}", MASTER_KEY))
+        .header("Authorization", format!("Bearer {}", master_key))
         .json(&gemini_payload)
         .send().await?;
 
@@ -141,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
         println!("Gemini Response OK. Tokens used: {:?}", body.get("usageMetadata"));
 
         let stream_resp = real_client.post(format!("{}/proxy/gemini-real/models/gemini-flash-lite-latest:streamGenerateContent?alt=sse", BALANCER_URL))
-            .header("Authorization", format!("Bearer {}", MASTER_KEY))
+            .header("Authorization", format!("Bearer {}", master_key))
             .json(&gemini_payload)
             .send().await?;
 
