@@ -54,7 +54,7 @@ pools:
 - name: gemini-real
   description: Real Gemini Flash Lite
   provider: google
-  target_url: https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent
+  target_url: https://generativelanguage.googleapis.com/v1beta
   capacity: 10
   keys:
   - id: GEMINI_REAL_KEY

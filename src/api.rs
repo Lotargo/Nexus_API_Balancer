@@ -1,6 +1,6 @@
 use axum::{
     extract::{State, FromRequestParts, Path},
-    http::{request::Parts, StatusCode, header::AUTHORIZATION, Method, HeaderMap, Response},
+    http::{request::Parts, StatusCode, header::AUTHORIZATION, Method, HeaderMap, Response, Uri},
     routing::{get, post, any},
     response::IntoResponse,
     body::{to_bytes, Body},
@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use arc_swap::ArcSwap;
 use uuid::Uuid;
+use futures::StreamExt;
 use crate::core::{KeyPool};
 use crate::auth::{AuthManager, Claims};
 use crate::config::{AppConfig};
@@ -34,6 +35,95 @@ fn is_hop_by_hop_header(name: &axum::http::HeaderName) -> bool {
             | "upgrade"
             | "content-length"
     )
+}
+
+fn build_target_url(target_base: &str, path: &str, query: Option<&str>) -> String {
+    let mut url = if path.is_empty() || path == "/" {
+        target_base.to_string()
+    } else if target_base.ends_with('/') {
+        format!("{}{}", target_base, path.trim_start_matches('/'))
+    } else {
+        format!("{}/{}", target_base, path.trim_start_matches('/'))
+    };
+
+    if let Some(query) = query.filter(|q| !q.is_empty()) {
+        let separator = if url.contains('?') { '&' } else { '?' };
+        url.push(separator);
+        url.push_str(query);
+    }
+
+    url
+}
+
+fn extract_response_tokens(bytes: &[u8], input_tokens: u32) -> u32 {
+    let mut output_tokens = 0;
+
+    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(bytes) {
+        if let Some(total) = json.get("usage").and_then(|u| u.get("total_tokens")).and_then(|t| t.as_u64()) {
+            output_tokens = total as u32;
+        } else if let Some(total) = json.get("usageMetadata").and_then(|u| u.get("totalTokenCount")).and_then(|t| t.as_u64()) {
+            output_tokens = total as u32;
+        } else {
+            output_tokens = crate::utils::estimate_response_tokens(&json) as u32;
+        }
+    } else if let Ok(text) = std::str::from_utf8(bytes) {
+        for payload in text.split("\n\n") {
+            for line in payload.lines() {
+                let line = line.trim();
+                if let Some(data) = line.strip_prefix("data:") {
+                    let data = data.trim();
+                    if data == "[DONE]" || data.is_empty() {
+                        continue;
+                    }
+
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                        if let Some(total) = json.get("usage").and_then(|u| u.get("total_tokens")).and_then(|t| t.as_u64()) {
+                            output_tokens = output_tokens.max(total as u32);
+                        } else if let Some(total) = json.get("usageMetadata").and_then(|u| u.get("totalTokenCount")).and_then(|t| t.as_u64()) {
+                            output_tokens = output_tokens.max(total as u32);
+                        } else {
+                            output_tokens = output_tokens.max(crate::utils::estimate_response_tokens(&json) as u32);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if output_tokens > input_tokens {
+        output_tokens
+    } else {
+        input_tokens.saturating_add(output_tokens)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_target_url, extract_response_tokens};
+
+    #[test]
+    fn builds_target_url_with_path_and_query() {
+        let url = build_target_url(
+            "https://generativelanguage.googleapis.com/v1beta",
+            "models/gemini-flash-lite-latest:streamGenerateContent",
+            Some("alt=sse"),
+        );
+        assert_eq!(
+            url,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:streamGenerateContent?alt=sse"
+        );
+    }
+
+    #[test]
+    fn extracts_tokens_from_gemini_sse_payload() {
+        let payload = br#"data: {"candidates":[{"content":{"parts":[{"text":"hi"}]}}],"usageMetadata":{"totalTokenCount":42}}
+
+data: [DONE]
+
+"#;
+
+        assert_eq!(extract_response_tokens(payload, 10), 42);
+    }
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -718,6 +808,7 @@ async fn handle_proxy(
     token: AuthToken,
     method: Method,
     Path(params): Path<HashMap<String, String>>,
+    uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> impl axum::response::IntoResponse {
@@ -736,11 +827,7 @@ async fn handle_proxy(
     let target_base = &pool_cfg.unwrap().target_url;
     let provider = &pool_cfg.unwrap().provider;
     
-    let target_url = if path.is_empty() || path == "/" {
-        target_base.clone()
-    } else {
-        format!("{}/{}", target_base.trim_end_matches('/'), path.trim_start_matches('/'))
-    };
+    let target_url = build_target_url(target_base, &path, uri.query());
     // Acquire key from the specific pool
     let pool = match state.pools.get(&pool_name) {
         Some(p) => p,
@@ -805,6 +892,12 @@ async fn handle_proxy(
         Ok(resp) => {
             let status = resp.status();
             let mut res_builder = Response::builder().status(status);
+            let is_sse = resp
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.starts_with("text/event-stream"))
+                .unwrap_or(false);
             
             for (name, value) in resp.headers().iter() {
                 if !is_hop_by_hop_header(name) {
@@ -812,43 +905,87 @@ async fn handle_proxy(
                 }
             }
 
-            let bytes = resp.bytes().await.unwrap_or_default();
-            
-            let mut output_tokens = 0;
-            // Attempt to track tokens from response usage
-            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                // OpenAI style usage
-                if let Some(total) = json.get("usage").and_then(|u| u.get("total_tokens")).and_then(|t| t.as_u64()) {
-                    output_tokens = total as u32;
-                } 
-                // Gemini style usageMetadata
-                else if let Some(total) = json.get("usageMetadata").and_then(|u| u.get("totalTokenCount")).and_then(|t| t.as_u64()) {
-                    output_tokens = total as u32;
+            if is_sse {
+                let db = state.db.clone();
+                let pool = state.pools.get(&pool_name).cloned().unwrap();
+                let client_id = token.0.sub.clone();
+                let pool_name_for_log = pool_name.clone();
+                let key_id_for_log = key_id.clone();
+                let key_for_stream = key.clone();
+                let status_for_log = if status.is_success() { "success".to_string() } else { status.as_str().to_string() };
+
+                let stream = futures::stream::unfold(
+                    (
+                        resp.bytes_stream(),
+                        Vec::<u8>::new(),
+                        Some((db, pool, key_for_stream, client_id, key_id_for_log, pool_name_for_log, status_for_log)),
+                    ),
+                    move |(mut upstream, mut collected, resources)| async move {
+                        match upstream.next().await {
+                            Some(Ok(chunk)) => {
+                                collected.extend_from_slice(&chunk);
+                                Some((Ok::<_, std::io::Error>(chunk), (upstream, collected, resources)))
+                            }
+                            Some(Err(err)) => {
+                                if let Some((db, pool, key, client_id, key_id, pool_name, _status_for_log)) = resources {
+                                    let total_tokens = extract_response_tokens(&collected, input_tokens);
+                                    key.record_usage(total_tokens);
+                                    pool.release(key).await;
+                                    let _ = db.log_request(crate::db::LogEntry {
+                                        client_id: Some(client_id),
+                                        key_id: Some(key_id),
+                                        pool_id: Some(pool_name),
+                                        status: "stream_error".to_string(),
+                                        tokens_used: total_tokens,
+                                        error_message: Some(err.to_string()),
+                                        ..Default::default()
+                                    }).await;
+                                }
+                                Some((Err(std::io::Error::other(err.to_string())), (upstream, collected, None)))
+                            }
+                            None => {
+                                if let Some((db, pool, key, client_id, key_id, pool_name, status_for_log)) = resources {
+                                    let total_tokens = extract_response_tokens(&collected, input_tokens);
+                                    key.record_usage(total_tokens);
+                                    pool.release(key).await;
+                                    if let Err(e) = db.log_request(crate::db::LogEntry {
+                                        client_id: Some(client_id),
+                                        key_id: Some(key_id),
+                                        pool_id: Some(pool_name),
+                                        status: status_for_log,
+                                        tokens_used: total_tokens,
+                                        ..Default::default()
+                                    }).await {
+                                        eprintln!("Failed to log streaming request to DB: {}", e);
+                                    }
+                                }
+                                None
+                            }
+                        }
+                    },
+                );
+
+                res_builder.body(Body::from_stream(stream)).unwrap().into_response()
+            } else {
+                let bytes = resp.bytes().await.unwrap_or_default();
+                let total_tokens = extract_response_tokens(&bytes, input_tokens);
+                key.record_usage(total_tokens);
+
+                state.pools.get(&pool_name).unwrap().release(key).await;
+                
+                if let Err(e) = state.db.log_request(crate::db::LogEntry {
+                    client_id: Some(token.0.sub.clone()),
+                    key_id: Some(key_id),
+                    pool_id: Some(pool_name),
+                    status: if status.is_success() { "success".to_string() } else { status.as_str().to_string() },
+                    tokens_used: total_tokens,
+                    ..Default::default()
+                }).await {
+                    eprintln!("Failed to log request to DB: {}", e);
                 }
-                // Fallback: estimate from JSON response body
-                else {
-                    output_tokens = crate::utils::estimate_response_tokens(&json) as u32;
-                }
+
+                res_builder.body(Body::from(bytes)).unwrap().into_response()
             }
-
-            let total_tokens = if output_tokens > input_tokens { output_tokens } else { input_tokens + output_tokens };
-            key.record_usage(total_tokens);
-
-            state.pools.get(&pool_name).unwrap().release(key).await;
-            
-            // Log to DB
-            if let Err(e) = state.db.log_request(crate::db::LogEntry {
-                client_id: Some(token.0.sub.clone()),
-                key_id: Some(key_id),
-                pool_id: Some(pool_name),
-                status: if status.is_success() { "success".to_string() } else { status.as_str().to_string() },
-                tokens_used: total_tokens,
-                ..Default::default()
-            }).await {
-                eprintln!("Failed to log request to DB: {}", e);
-            }
-
-            res_builder.body(Body::from(bytes)).unwrap().into_response()
         }
         Err(e) => {
             state.pools.get(&pool_name).unwrap().release(key).await;

@@ -1,195 +1,116 @@
-<div align="center">
-
 # Nexus API Balancer
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
-[![OAuth 2.1](https://img.shields.io/badge/Security-OAuth_2.1-green.svg)](https://oauth.net/2.1/)
-[![MCP](https://img.shields.io/badge/Protocol-MCP-green.svg)](https://modelcontextprotocol.io/)
-[![Scalar](https://img.shields.io/badge/Docs-Scalar-green.svg)](https://scalar.com/)
-[![SQLx](https://img.shields.io/badge/Database-SQLx-green.svg)](https://github.com/launchbadge/sqlx)
+Rust-based proxy and key balancer for AI providers. It routes requests through named pools, injects provider credentials, enforces per-key limits, and logs usage to SQLite.
 
-**A high-performance, asynchronous API load balancer designed for decentralized AI networks.**  
-_Secure, Scalable, and MCP-ready._
+## What it does
 
-</div>
+- Proxies OpenAI-compatible, Anthropic, and Gemini requests.
+- Supports both regular JSON responses and upstream `text/event-stream` passthrough.
+- Preserves request path and query string, which is required for Gemini SSE (`?alt=sse`).
+- Tracks request/token usage per key and writes aggregate stats to SQLite.
+- Supports JWT auth, a shared master key, admin endpoints, and MCP JSON-RPC helpers.
 
----
+## Quick start
 
-## 🚀 Features
-
-- **High Concurrency**: Asynchronous pool management using `tokio` and `async-channel`.
-- **Persistent Storage**: SQLite integration for tracking pools, keys, and clients with full transactionality.
-- **Observability**: Detailed request logging for analytics, latency tracking, and error auditing.
-- **Admin Protection**: Dedicated administrative layer secured via `.env` secrets and `X-Admin-Key` headers.
-- **Client Isolation**: Strict partitioning ensures clients only see and access their assigned pools.
-- **Transparent Proxy**: Automatic header injection for OpenAI, Anthropic, and Google Gemini providers.
-- **OAuth 2.1 & Hybrid Auth**: Mandatory token validation with Master Key and Public Registration options.
-- **Dynamic Key Management**: Export/Import provider keys via API with zero-downtime persistence.
-- **MCP Enabled**: Integrated Model Context Protocol server with advanced key management tools.
-- **Interactive Documentation**: Premium API explorer via **Scalar** available at `/scalar`.
-- **Graceful Shutdown**: Proper signal handling (Ctrl+C) for clean termination and resource cleanup.
-- **Dynamic Configuration**: Hot-reloading of configuration via `ArcSwap` and secure API.
-
----
-
-## 🏗 Architecture
-
-Nexus Balancer is built with a **Library + Binary** architecture, making it easy to integrate into other Rust projects or test extensively using native integration tools.
-
-```mermaid
-graph TD
-    Client[AI Client / Swarm Node] -- OAuth 2.1 Bearer --> API[Axum REST/MCP API]
-    Admin[Administrator] -- X-Admin-Key --> API
-    API -- Extract Claims --> Auth[Auth Manager]
-    Auth -- Validate JWT / Admin Secret --> API
-    API -- Isolation Filter --> DB[(SQLite DB)]
-    API -- Acquire Slot --> Pool[Key Pool]
-    Pool -- Shared State --> Key[API Key Inner]
-    Key -- Check RPS/TTL/Ban --> Pool
-    Pool -- Slot Granted --> Worker[Worker Thread]
-    Worker -- Execute Request --> Provider[External API Provider]
-    Worker -- Release Slot --> Pool
-    API -- Async Log --> DB
-```
-
----
-
-## 📊 Performance Benchmarks
-
-The following metrics were captured under a stress load of **500 concurrent requests** targeting a pool with a combined limit of **17 RPS**.
-
-### Core Metrics Summary
-
-| Metric               | Performance                  | Status              |
-| :------------------- | :--------------------------- | :------------------ |
-| **Throughput**       | 1,651.56 req/sec             | ⚡ High Performance |
-| **Request Accuracy** | 100% (Exactly 17 authorized) | 🎯 Precision        |
-| **Avg Latency**      | 2.86 ms                      | 🚀 Low Latency      |
-| **P95 Latency**      | 8.00 ms                      | 📉 Stable           |
-| **Error Rate**       | 0.0%                         | 🛡️ Reliable         |
-
-### Visual Analysis
-
-#### 1. Latency Distribution
-
-The chart below illustrates the distribution of response times under load. The majority of requests are handled within the 2-5ms range, confirming the minimal overhead introduced by the balancing and OAuth 2.1 validation layers.
-
-![Latency Distribution](assets/latency_distribution.png)
-
-#### 2. Rate Limiting Effectiveness
-
-During stress testing (500 concurrent requests), the Nexus Balancer demonstrates precise control over downstream resource consumption. It strictly enforces the configured global limits (17 RPS in this test), shielding external providers from potential flooding.
-
-![Request Outcomes](assets/request_outcomes.png)
-
----
-
-## 🛠 Quick Start
-
-### 1. Prerequisites
-
-- Rust 1.75 or higher
-- Cargo
-
-### 2. Installation
+1. Create local config and secrets:
 
 ```bash
-git clone https://github.com/nexus/nexus-balancer.git
-cd nexus-balancer
-cargo build --release
+cp .env.example .env
+cp config.yaml.example config.yaml
+mkdir -p secrets
 ```
 
-### 3. Configuration
+2. Put provider keys into files inside `secrets/`. Example:
 
-1. Copy the example files:
-   ```bash
-   cp .env.example .env
-   cp config.yaml.example config.yaml
-   ```
-2. Edit `.env` and `config.yaml` to suit your needs. See `config.yaml.example` for all available parameters.
+```bash
+echo "your-gemini-key" > secrets/gemini_key_1
+echo "your-openai-key" > secrets/openai_key_1
+```
 
-### 4. Running the Server
+3. Start the server:
 
 ```bash
 cargo run
 ```
 
-_The server will display a professional ASCII banner and provide links to the API and documentation._
+The server listens on the `server.port` from `config.yaml`. The local project config in this repo uses `127.0.0.1:3000`.
 
-### 5. Client Registration (Admin)
+## Proxy usage
 
-To register a new client and generate an API key (JWT):
+Proxy endpoint:
 
-```bash
-curl -X POST http://127.0.0.1:8080/admin/clients \
-     -H "X-Admin-Key: your-admin-secret" \
-     -H "Content-Type: application/json" \
-     -d '{"id": "my_client", "name": "Team A"}'
+```text
+/proxy/:pool_name/*path
 ```
 
-### 6. Local Usage (No Auth)
+Headers are forwarded except client auth headers, and the balancer injects the upstream provider credential automatically.
 
-For local or private usage, you can disable authentication in `config.yaml`. In this mode, all requests are automatically granted **Admin** privileges.
+Example OpenAI-compatible call:
 
-### 7. Interactive Testing
+```bash
+curl -X POST http://127.0.0.1:3000/proxy/openai-pool/v1/chat/completions \
+  -H "Authorization: Bearer nexus-master-key-2024" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}]}'
+```
 
-Once the server is running, visit:
+Example Gemini SSE call:
 
-- **Scalar UI**: `http://127.0.0.1:8080/scalar` (Interactive API explorer)
-- **Stats**: `http://127.0.0.1:8080/stats` (Requires `X-Admin-Key`)
+```bash
+curl -N -X POST "http://127.0.0.1:3000/proxy/gemini-pool/models/gemini-flash-lite-latest:streamGenerateContent?alt=sse" \
+  -H "Authorization: Bearer nexus-master-key-2024" \
+  -H "Content-Type: application/json" \
+  -d '{"contents":[{"parts":[{"text":"Say hello in one sentence"}]}]}'
+```
 
----
+For Gemini non-streaming requests, use:
 
-## 📡 API Reference
+```text
+/proxy/gemini-pool/models/<model>:generateContent
+```
 
-### Operational Endpoints
+For Gemini SSE, use:
 
-| Method  | Endpoint   | Description                      | Auth Required      |
-| :------ | :--------- | :------------------------------- | :----------------- |
-| `POST`  | `/execute` | Run a task through the balancer  | OAuth 2.1 (Client) |
-| `ANY`   | `/proxy/:pool/*path` | Transparent provider proxy | OAuth 2.1 / Master |
-| `POST`  | `/auth/register` | Self-service client registration | Public (Optional) |
-| `GET`   | `/stats`   | View real-time DB analytics      | Admin Key          |
-| `GET`   | `/config`  | View current configuration       | Admin Key          |
-| `PATCH` | `/config`  | Update configuration dynamically | Admin Key          |
-| `GET`   | `/admin/keys/:pool/:id` | Export key with secret | Admin Key |
-| `POST`  | `/admin/keys/:pool` | Import new key dynamically | Admin Key |
-| `POST`  | `/mcp`     | MCP JSON-RPC interface           | OAuth 2.1 / Admin  |
+```text
+/proxy/gemini-pool/models/<model>:streamGenerateContent?alt=sse
+```
 
-### MCP (Model Context Protocol)
+## Configuration notes
 
-The balancer exposes an MCP-compliant endpoint at `/mcp` (JSON-RPC 2.0).
+- `target_url` should be a provider base URL, not a hardcoded single method URL, when you want multiple endpoints like Gemini `generateContent` and `streamGenerateContent`.
+- The shared master key in `config.yaml` is intentionally supported by the architecture and can be used for trusted internal clients.
+- Real provider secrets should stay in `secrets/` or environment variables used by test/setup scripts, not in tracked source files.
 
-**Tools:**
+See [config.yaml.example](/F:/Кейс/Nexus_API_Balancer/config.yaml.example) for the current schema.
 
-- `list_pools`: Returns a list of pools with their descriptions.
-- `update_description`: Allows an agent to update a pool's description.
-- `export_key`: Retrieve a key's secret by its ID (Admin only).
-- `import_key`: Dynamically add a new key to a running pool (Admin only).
+## Admin and observability
 
----
+- `GET /stats` returns aggregate request/token stats.
+- `GET /config` and `PATCH /config` expose runtime config for admins.
+- `POST /admin/clients` creates JWT-bearing clients.
+- `GET /admin/keys/:pool/:id` and `POST /admin/keys/:pool` export/import provider keys.
+- `POST /mcp` exposes MCP-style JSON-RPC helpers for pool discovery and key management.
 
-## 🧪 Testing & Benchmarking
+Admin auth uses `X-Admin-Key`, loaded from `ADMIN_API_KEY` in `.env`.
 
-The project uses a unified, high-performance E2E testing and benchmarking suite written in Rust.
+## Testing
 
-### Running the Suite
-1. Ensure the Nexus Balancer is running (`cargo run`).
-2. Navigate to the test directory and run:
-   ```bash
-   cd tests/nexus_e2e
-   cargo run
-   ```
+Project checks:
 
-**The suite automatically validates:**
-- **Deadlock Protection**: Ensures the server remains responsive even under full pool capacity.
-- **High-Speed Concurrency**: Executes 30+ simultaneous requests with near-zero overhead.
-- **Dynamic Key Management**: Real-time export, import, and rotation validation.
-- **Internal Mocking**: Includes an embedded high-speed mock provider for isolated testing.
+```bash
+cargo check
+cd tests/nexus_e2e && cargo check
+```
 
----
+End-to-end suite:
 
-## 📜 License
+```bash
+cd tests/nexus_e2e
+GEMINI_REAL_API_KEY=your-real-key cargo run
+```
 
-Distributed under the **Apache License 2.0**. See `LICENSE` for more information.
+The E2E suite starts an internal mock provider, boots the balancer, validates concurrency and rate limiting, performs a real Gemini `generateContent` request, and then verifies Gemini SSE via `streamGenerateContent?alt=sse`.
+
+## License
+
+Apache-2.0. See [LICENSE](/F:/Кейс/Nexus_API_Balancer/LICENSE).
