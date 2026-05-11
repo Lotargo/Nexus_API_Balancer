@@ -3,10 +3,11 @@ use axum::{
     http::{request::Parts, StatusCode, header::AUTHORIZATION, Method, HeaderMap, Response, Uri},
     routing::{get, post, any},
     response::IntoResponse,
-    body::{to_bytes, Body},
+    body::{to_bytes, Body, Bytes},
     Json, Router,
     async_trait,
 };
+
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -19,8 +20,8 @@ use crate::config::{AppConfig};
 use crate::mcp::{BalancerMcpServer, McpRequest, McpResponse};
 use crate::db::{Database, LogEntry};
 use utoipa::{OpenApi, ToSchema};
-use std::time::Duration;
-use tokio::time::{sleep, Instant};
+use tokio::time::Instant;
+use chrono::Local;
 
 fn is_hop_by_hop_header(name: &axum::http::HeaderName) -> bool {
     matches!(
@@ -47,9 +48,16 @@ fn build_target_url(target_base: &str, path: &str, query: Option<&str>) -> Strin
     };
 
     if let Some(query) = query.filter(|q| !q.is_empty()) {
-        let separator = if url.contains('?') { '&' } else { '?' };
-        url.push(separator);
-        url.push_str(query);
+        // Remove 'key=' parameter if present to avoid conflicts with upstream
+        let filtered: Vec<&str> = query.split('&')
+            .filter(|pair| !pair.starts_with("key="))
+            .collect();
+            
+        if !filtered.is_empty() {
+            let separator = if url.contains('?') { '&' } else { '?' };
+            url.push(separator);
+            url.push_str(&filtered.join("&"));
+        }
     }
 
     url
@@ -166,6 +174,8 @@ pub struct KeyExportResponse {
 pub struct KeyImportRequest {
     pub key: crate::config::KeyConfig,
     pub secret: String,
+    pub provider: Option<String>,
+    pub kv_cache: Option<bool>,
 }
 
 pub struct AppState {
@@ -225,7 +235,7 @@ where
             }
         }
 
-        // 2. Check for Bearer token
+        // 2. Check for token in headers or query
         let auth_header = parts
             .headers
             .get(AUTHORIZATION)
@@ -233,13 +243,26 @@ where
             .filter(|h| h.starts_with("Bearer "))
             .map(|h| &h[7..]);
 
-        match auth_header {
+        let token = auth_header
+            .or_else(|| parts.headers.get("x-goog-api-key").and_then(|h| h.to_str().ok()))
+            .or_else(|| parts.headers.get("x-api-key").and_then(|h| h.to_str().ok()))
+            .or_else(|| parts.headers.get("api-key").and_then(|h| h.to_str().ok()))
+            .or_else(|| {
+                parts.uri.query()
+                    .and_then(|q| q.split('&').find(|pair| pair.starts_with("key=")))
+                    .map(|pair| &pair[4..])
+            });
+
+        match token {
             Some(token) => {
-                // 2.1 Check for Master Key (Universal shared secret)
                 if let Some(ref master) = config.auth.master_key {
                     if token == master {
+                        let client_id = parts.headers.get("X-Nexus-Client-Id")
+                            .and_then(|h| h.to_str().ok())
+                            .unwrap_or("master-user");
+                            
                         return Ok(AuthToken(Claims {
-                            sub: "master-user".to_string(),
+                            sub: client_id.to_string(),
                             exp: 0,
                             iss: "internal".to_string(),
                             aud: "all".to_string(),
@@ -294,8 +317,16 @@ pub fn create_router(
     db: Database,
     storage: crate::storage::SecretStorage,
 ) -> Router {
+    let http_client = reqwest::Client::new();
+    
     // Note: MCP currently still uses 'primary' pool or first pool for simplicity
-    let mcp = BalancerMcpServer::new(pools.clone(), config.clone(), storage.clone());
+    let mcp = BalancerMcpServer::new(
+        pools.clone(), 
+        config.clone(), 
+        storage.clone(), 
+        http_client.clone(),
+        db.clone(),
+    );
     
     let state = Arc::new(AppState { 
         pools, 
@@ -304,8 +335,9 @@ pub fn create_router(
         mcp,
         db,
         storage,
-        http_client: reqwest::Client::new(),
+        http_client,
     });
+
     
     Router::new()
         .route("/execute", post(handle_execute))
@@ -317,7 +349,11 @@ pub fn create_router(
         .route("/admin/keys/:pool_name", post(handle_import_key))
         .route("/proxy/:pool_name", any(handle_proxy))
         .route("/proxy/:pool_name/*path", any(handle_proxy))
+        // Unified Gateway (Auto-routing by model)
+        .route("/v1/*path", any(handle_unified_proxy))
+        .route("/v1beta/*path", any(handle_unified_proxy))
         .route("/mcp", post(handle_mcp))
+
         .with_state(state)
 }
 
@@ -406,8 +442,6 @@ async fn handle_execute(
 
         return Json(response);
     } else {
-        sleep(Duration::from_millis(50)).await;
-        
         let key_id = key.id();
         pool.release(key).await;
 
@@ -568,6 +602,7 @@ async fn handle_export_key(
     (StatusCode::NOT_FOUND, "Key or pool not found").into_response()
 }
 
+
 #[utoipa::path(
     post,
     path = "/admin/keys/{pool_name}",
@@ -577,6 +612,7 @@ async fn handle_export_key(
     request_body = KeyImportRequest,
     responses(
         (status = 201, description = "Key imported successfully"),
+        (status = 400, description = "Invalid key or unsupported provider"),
         (status = 404, description = "Pool not found"),
         (status = 403, description = "Forbidden")
     ),
@@ -584,53 +620,14 @@ async fn handle_export_key(
 )]
 async fn handle_import_key(
     State(state): State<Arc<AppState>>,
-    _token: AdminToken,
+    token: AuthToken,
     Path(pool_name): Path<String>,
     Json(payload): Json<KeyImportRequest>,
 ) -> impl IntoResponse {
-    // 1. Save secret to disk
-    if let Err(e) = state.storage.save_secret(&payload.key.secret_name, &payload.secret) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to save secret: {}", e)).into_response();
-    }
-
-    // 2. Update config in memory
-    let mut new_config = (**state.config.load()).clone();
-    let pool_idx = new_config.pools.iter().position(|p| p.name == pool_name);
-    
-    if let Some(idx) = pool_idx {
-        new_config.pools[idx].keys.push(payload.key.clone());
-        
-        // 3. Persist config to disk
-        if let Err(e) = new_config.save("config.yaml") {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to save config: {}", e)).into_response();
-        }
-        
-        // 4. Update the running pool
-        if let Some(pool) = state.pools.get(&pool_name) {
-            let key = crate::core::ApiKey::new(
-                &payload.key.id,
-                payload.key.rps_limit,
-                payload.key.rpd_limit,
-                payload.key.tpm_limit,
-                payload.key.tpd_limit,
-                payload.key.max_request_tokens,
-                payload.key.cooldown_on_limit.unwrap_or(false),
-                payload.secret,
-                payload.key.secret_type.clone(),
-                None,
-            );
-            
-            for _ in 0..payload.key.concurrency {
-                if let Err(e) = pool.add_key(key.clone()) {
-                    return (StatusCode::BAD_REQUEST, format!("Failed to inject key into running pool: {}", e)).into_response();
-                }
-            }
-        }
-
-        state.config.store(Arc::new(new_config));
-        (StatusCode::CREATED, "Key imported successfully").into_response()
-    } else {
-        (StatusCode::NOT_FOUND, "Pool not found").into_response()
+    let result = state.mcp.import_key(&token.0.sub, &pool_name, payload.key, payload.secret, payload.provider, payload.kv_cache).await;
+    match result {
+        Ok(msg) => (StatusCode::CREATED, msg).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
 }
 
@@ -772,10 +769,13 @@ async fn handle_mcp(
             let pool_name = params["pool_name"].as_str().unwrap_or_default();
             let key_cfg_res: Result<crate::config::KeyConfig, _> = serde_json::from_value(params["key_cfg"].clone());
             let secret = params["secret"].as_str().unwrap_or_default().to_string();
+            let provider = params["provider"].as_str().map(|s| s.to_string());
+            let kv_cache = params.get("kv_cache").and_then(|v| v.as_bool());
             
             match key_cfg_res {
                 Ok(key_cfg) => {
-                    match state.mcp.import_key(pool_name, key_cfg, secret).await {
+                    match state.mcp.import_key(&token.0.sub, pool_name, key_cfg, secret, provider, kv_cache).await {
+
                         Ok(msg) => Some(serde_json::Value::String(msg)),
                         Err(e) => return Json(McpResponse {
                             jsonrpc: "2.0".to_string(),
@@ -801,11 +801,97 @@ async fn handle_mcp(
         jsonrpc: "2.0".to_string(),
         id: request.id,
         result,
-        error: if is_none { Some(serde_json::Value::String("Method not found".to_string())) } else { None },
+error: if is_none { Some(serde_json::Value::String("Method not found".to_string())) } else { None },
     })
 }
 
-/// Transparent Proxy Handler
+/// Unified Gateway Handler: Routes requests based on the 'model' field in the body
+async fn handle_unified_proxy(
+    State(state): State<Arc<AppState>>,
+    token: AuthToken,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Body,
+) -> impl axum::response::IntoResponse {
+    let path = uri.path().to_string();
+    let body_bytes = to_bytes(body, 25 * 1024 * 1024).await.unwrap_or_default();
+    
+    // 1. Try to detect model from body
+    let mut model_name = if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+        json["model"].as_str().map(|s| s.to_string())
+    } else {
+        None
+    };
+
+    // 2. If not in body, try to detect from path (Google Gemini style: /v1beta/models/...)
+    if model_name.is_none() {
+        if let Some(idx) = path.find("/models/") {
+            let model_part = &path[idx + 8..];
+            // Take up to the first ':' or '/'
+            let model = model_part.split(':').next().unwrap_or(model_part).split('/').next().unwrap_or(model_part);
+            model_name = Some(model.to_string());
+        }
+    }
+
+    // 3. Routing Logic: Find the best pool
+    let config = state.config.load();
+
+    // Get allowed pools for this client
+    let allowed_pools = if token.0.role.as_deref() == Some("admin") {
+        None // Admin sees all
+    } else {
+        Some(state.db.get_allowed_pools(&token.0.sub).await.unwrap_or_default())
+    };
+
+    let find_pool = |providers: &[&str]| {
+        config.pools.iter()
+            .filter(|p| providers.contains(&p.provider.as_str()))
+            .filter(|p| allowed_pools.as_ref().map_or(true, |allowed| allowed.contains(&p.name)))
+            .next()
+            .map(|p| p.name.clone())
+    };
+
+    let pool_name = if let Some(ref model) = model_name {
+        let model_low = model.to_lowercase();
+        if model_low.starts_with("gpt-") || model_low.starts_with("o1-") || model_low.starts_with("text-davinci") {
+            find_pool(&["openai"])
+        } else if model_low.starts_with("claude-") {
+            find_pool(&["anthropic", "claude"])
+        } else if model_low.starts_with("gemini-") {
+            find_pool(&["google", "gemini"])
+        } else if model_low.starts_with("deepseek-") {
+            find_pool(&["deepseek"])
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    println!(" [{}] [DEBUG] Routing request to pool: '{}' for model: '{:?}' for client: '{}'", Local::now().format("%H:%M:%S%.3f"), pool_name.as_deref().unwrap_or("none"), model_name, token.0.sub);
+
+    // Fallback to first allowed pool if no match or no model
+    let pool_name = pool_name.or_else(|| {
+        config.pools.iter()
+            .filter(|p| allowed_pools.as_ref().map_or(true, |allowed| allowed.contains(&p.name)))
+            .next()
+            .map(|p| p.name.clone())
+    });
+
+    let Some(pool_name) = pool_name else {
+        return (StatusCode::FORBIDDEN, "No authorized pools available for routing").into_response();
+    };
+
+    // 3. Delegate to the standard proxy handler (re-using the logic)
+    // We create a new Path params map for handle_proxy
+    let mut params = HashMap::new();
+    params.insert("pool_name".to_string(), pool_name);
+    params.insert("path".to_string(), path);
+
+    handle_proxy_internal(state, token, method, params, uri, headers, body_bytes).await
+}
+
 async fn handle_proxy(
     State(state): State<Arc<AppState>>,
     token: AuthToken,
@@ -814,7 +900,23 @@ async fn handle_proxy(
     uri: Uri,
     headers: HeaderMap,
     body: Body,
-) -> impl axum::response::IntoResponse {
+) -> impl IntoResponse {
+    let body_bytes = to_bytes(body, 25 * 1024 * 1024).await.unwrap_or_default();
+    handle_proxy_internal(state, token, method, params, uri, headers, body_bytes).await
+}
+
+async fn handle_proxy_internal(
+    state: Arc<AppState>,
+    token: AuthToken,
+    method: Method,
+    params: HashMap<String, String>,
+    uri: Uri,
+    headers: HeaderMap,
+    body_bytes: Bytes,
+) -> Response<Body> {
+    let start_time = Instant::now();
+    println!(" [{}] [DEBUG] Proxy: Processing request (Body size: {} bytes)", Local::now().format("%H:%M:%S%.3f"), body_bytes.len());
+
     let Some(pool_name) = params.get("pool_name").cloned() else {
         return (StatusCode::BAD_REQUEST, "Missing pool name").into_response();
     };
@@ -830,6 +932,24 @@ async fn handle_proxy(
     let target_base = &pool_cfg.unwrap().target_url;
     let provider = &pool_cfg.unwrap().provider;
     
+    // Authorization & KV Cache Check
+    let mut kv_cache_enabled = false;
+    if token.0.sub != "admin-bypass" {
+        let allowed: HashMap<String, bool> = state.db.get_allowed_pools_ext(&token.0.sub).await.unwrap_or_default();
+        
+        // If not admin, strictly check authorization
+        if token.0.role.as_deref() != Some("admin") {
+            if !allowed.contains_key(&pool_name) {
+                return (StatusCode::FORBIDDEN, format!("Client '{}' is not authorized to use pool '{}'", token.0.sub, pool_name)).into_response();
+            }
+        }
+        
+        kv_cache_enabled = allowed.get(&pool_name).copied().unwrap_or(false);
+        if kv_cache_enabled {
+            println!(" [{}] [DEBUG] KV Cache is ENABLED for client: '{}' on pool: '{}'", Local::now().format("%H:%M:%S%.3f"), token.0.sub, pool_name);
+        }
+    }
+
     let target_url = build_target_url(target_base, &path, uri.query());
     // Acquire key from the specific pool
     let pool = match state.pools.get(&pool_name) {
@@ -837,9 +957,9 @@ async fn handle_proxy(
         None => return (StatusCode::NOT_FOUND, "Pool implementation not found").into_response(),
     };
     let key = pool.acquire().await;
+    let acquire_elapsed = start_time.elapsed();
     let key_id = key.id();
 
-    let body_bytes = to_bytes(body, 25 * 1024 * 1024).await.unwrap_or_default();
     let input_tokens = if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
         crate::utils::estimate_request_tokens(&json) as u32
     } else {
@@ -868,20 +988,46 @@ async fn handle_proxy(
         inner._secret.clone()
     };
 
-    // Forward the request
-    let mut req_builder = state.http_client.request(method, &target_url);
+    // Determine final target URL and headers
+    let is_google = provider == "google" || provider == "gemini" || target_url.contains("googleapis.com");
+    let mut final_url = target_url;
 
-    // Forward headers (except authorization)
+    if is_google {
+        if kv_cache_enabled {
+            // Context Caching in Gemini requires v1beta
+            if final_url.contains("/v1/") {
+                final_url = final_url.replace("/v1/", "/v1beta/");
+            } else if final_url.contains("/v1alpha/") {
+                final_url = final_url.replace("/v1alpha/", "/v1beta/");
+            } else if !final_url.contains("/v1beta/") {
+                // If no version found in path, try to inject it if it's a standard models path
+                if final_url.contains("/models/") {
+                   final_url = final_url.replace("/models/", "/v1beta/models/");
+                }
+            }
+        }
+
+        // Gemini often requires ?key= in addition to or instead of headers
+        let separator = if final_url.contains('?') { '&' } else { '?' };
+        if !final_url.contains("key=") {
+            final_url = format!("{}{}key={}", final_url, separator, secret);
+        }
+    }
+
+    // Forward the request
+    let mut req_builder = state.http_client.request(method, &final_url);
+
+    // Forward headers (except authorization, host, and provider-specific keys)
     for (name, value) in headers.iter() {
-        if name != AUTHORIZATION && name != "host" {
+        let name_lower = name.as_str().to_lowercase();
+        if name_lower != "authorization" && name_lower != "host" && name_lower != "x-goog-api-key" && name_lower != "x-api-key" && name_lower != "api-key" {
             req_builder = req_builder.header(name, value);
         }
     }
 
-    // Inject our balanced key based on provider detection
-    if provider == "google" || target_url.contains("googleapis.com") {
+    if is_google {
         req_builder = req_builder.header("x-goog-api-key", &secret);
-    } else if provider == "anthropic" || target_url.contains("anthropic.com") {
+    } else if provider == "anthropic" || provider == "claude" || final_url.contains("anthropic.com") {
         req_builder = req_builder.header("x-api-key", &secret);
         req_builder = req_builder.header("anthropic-version", "2023-06-01");
     } else {
@@ -890,6 +1036,8 @@ async fn handle_proxy(
     }
 
     let res = req_builder.body(body_bytes).send().await;
+
+
 
     match res {
         Ok(resp) => {
@@ -901,6 +1049,10 @@ async fn handle_proxy(
                 .and_then(|v| v.to_str().ok())
                 .map(|v| v.starts_with("text/event-stream"))
                 .unwrap_or(false);
+            
+            let upstream_elapsed = start_time.elapsed();
+            println!(" [{}] [DEBUG] Proxy: Upstream status {}, SSE: {}, Acquire: {:?}, Total: {:?}", 
+                     Local::now().format("%H:%M:%S%.3f"), status, is_sse, acquire_elapsed, upstream_elapsed);
             
             for (name, value) in resp.headers().iter() {
                 if !is_hop_by_hop_header(name) {

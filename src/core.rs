@@ -2,7 +2,7 @@ use async_channel::{bounded, Receiver, Sender};
 use std::time::Duration;
 use tokio::time::Instant;
 use std::sync::{Arc, Mutex};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Utc, Local};
 
 /// Internal state of an API key, shared across multiple pool slots.
 #[derive(Debug)]
@@ -150,6 +150,7 @@ impl ApiKey {
 
         state.requests_this_second += 1;
         state.requests_today += 1;
+        println!(" [{}] [DEBUG] Key '{}' usage incremented (RPS: {}, Today: {})", Local::now().format("%H:%M:%S%.3f"), state.id, state.requests_this_second, state.requests_today);
         Ok(())
     }
 
@@ -186,10 +187,14 @@ impl KeyPool {
     }
 
     pub async fn acquire(&self) -> ApiKey {
-        self.receiver.recv().await.expect("Channel closed")
+        let key = self.receiver.recv().await.expect("Channel closed");
+        println!(" [{}] [DEBUG] KeyPool: Acquired key '{}'", Local::now().format("%H:%M:%S%.3f"), key.id());
+        key
     }
 
     pub async fn release(&self, key: ApiKey) {
+        let id = key.id();
         self.sender.send(key).await.expect("Channel closed");
+        println!(" [{}] [DEBUG] KeyPool: Released key '{}' back to pool", Local::now().format("%H:%M:%S%.3f"), id);
     }
 }

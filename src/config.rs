@@ -52,7 +52,26 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
+    pub fn get_standard_url(provider: &str) -> Option<&'static str> {
+        match provider.to_lowercase().as_str() {
+            "openai" => Some("https://api.openai.com/v1"),
+            "gemini" | "google" => Some("https://generativelanguage.googleapis.com"),
+            "grok" | "xai" => Some("https://api.x.ai/v1"),
+            "cerebras" => Some("https://api.cerebras.ai/v1"),
+            "sambanova" => Some("https://api.sambanova.ai/v1"),
+            "cohere" => Some("https://api.cohere.com/v2"),
+            "mistral" => Some("https://api.mistral.ai/v1"),
+            "deepseek" => Some("https://api.deepseek.com"),
+            _ => None,
+        }
+    }
+
+    pub fn get_supported_providers() -> Vec<&'static str> {
+        vec!["openai", "gemini", "grok", "cerebras", "sambanova", "cohere", "mistral", "deepseek"]
+    }
+
     pub fn load(path: &str) -> Result<Self> {
+
         let content = fs::read_to_string(path)?;
         let config: AppConfig = serde_yaml::from_str(&content)?;
         Ok(config)

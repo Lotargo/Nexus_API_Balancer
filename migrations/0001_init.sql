@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS clients (
 CREATE TABLE IF NOT EXISTS client_pools (
     client_id TEXT NOT NULL,
     pool_id TEXT NOT NULL,
+    kv_cache BOOLEAN NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (client_id, pool_id)
 );

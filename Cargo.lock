@@ -1256,6 +1256,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sqlx",
+ "tempfile",
  "tiktoken-rs",
  "tokio",
  "tower-http 0.5.2",

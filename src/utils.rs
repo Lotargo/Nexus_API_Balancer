@@ -111,7 +111,43 @@ fn collect_all_string_segments(value: &Value, segments: &mut Vec<String>) {
     }
 }
 
+pub async fn verify_key(client: &reqwest::Client, provider: &str, target_url: &str, secret: &str) -> Result<(), String> {
+    println!(" [DEBUG] Verifying key for provider: {} at {}", provider, target_url);
+
+    let url = match provider.to_lowercase().as_str() {
+        "gemini" | "google" => format!("{}/v1beta/models?key={}", target_url.trim_end_matches('/'), secret),
+        "cohere" => format!("{}/models", target_url.trim_end_matches('/')),
+        _ => {
+            // Default OpenAI-compatible check
+            if target_url.ends_with("/v1") {
+                format!("{}/models", target_url.trim_end_matches('/'))
+            } else {
+                format!("{}/v1/models", target_url.trim_end_matches('/'))
+            }
+        }
+    };
+
+    let mut request = client.get(&url);
+    
+    // Add auth headers (except for Gemini where it's in the URL)
+    if !matches!(provider.to_lowercase().as_str(), "gemini" | "google") {
+        request = request.header("Authorization", format!("Bearer {}", secret));
+    }
+
+    let resp = request.send().await
+        .map_err(|e| format!("Network error during verification: {}", e))?;
+
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        let status = resp.status();
+        let error_text = resp.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        Err(format!("Validation failed (Status {}): {}", status, error_text))
+    }
+}
+
 fn push_text(segments: &mut Vec<String>, text: &str) {
+
     if !text.trim().is_empty() {
         segments.push(text.to_owned());
     }
