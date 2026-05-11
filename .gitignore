@@ -1,4 +1,5 @@
-/target
+# General
+**/target
 /secrets
 .env
 *.env
@@ -10,7 +11,7 @@ nexus.db
 nexus.db-shm
 nexus.db-wal
 
-# Python
+# Python (Cleanup)
 __pycache__/
 *.pyc
 *.pyo
@@ -22,3 +23,6 @@ __pycache__/
 .idea/
 *.swp
 *.swo
+
+# Project specific
+tests/nexus_e2e/target

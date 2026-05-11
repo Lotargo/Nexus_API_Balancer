@@ -170,17 +170,21 @@ The balancer exposes an MCP-compliant endpoint at `/mcp` (JSON-RPC 2.0).
 
 ## 🧪 Testing (E2E)
 
-The project includes a comprehensive suite of tests to ensure stability and security:
+The project uses a unified, high-performance E2E testing and benchmarking suite written in Rust.
 
-### Python E2E & Stress Tests
-- `tests/execute_e2e_concurrent.py`: Advanced stress-test for 30+ concurrent connections and pool isolation.
-- `tests/execute_e2e.py`: Basic end-to-end verification of the request lifecycle.
-- `tests/test_dynamic_keys.py`: Verifies hot-swapping and persistence of provider keys via API.
-- `tests/test_mcp.py`: Validates the MCP JSON-RPC toolchain and agent interactions.
-- `tests/mock_providers.py`: A local mock server used to simulate external AI provider responses.
+### Running the Rust E2E Suite
+1. Ensure the Nexus Balancer is running (`cargo run`).
+2. Navigate to the test directory and run the suite:
+   ```bash
+   cd tests/nexus_e2e
+   cargo run
+   ```
 
-### Rust Integration Tests
-- `tests/security_tests.rs`: Native Rust integration tests focusing on authentication and authorization logic.
+**The suite automatically performs:**
+- **Concurrency Test**: 30 simultaneous requests with pool isolation verification.
+- **Dynamic Key Test**: Real-time export, import, and rotation validation.
+- **MCP Validation**: JSON-RPC toolchain and resource checking.
+- **Mock Provider**: Includes an internal high-speed mock server.
 
 ---
 
