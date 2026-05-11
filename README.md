@@ -35,6 +35,8 @@ _Secure, Scalable, and MCP-ready._
 
 ## 🏗 Architecture
 
+Nexus Balancer is built with a **Library + Binary** architecture, making it easy to integrate into other Rust projects or test extensively using native integration tools.
+
 ```mermaid
 graph TD
     Client[AI Client / Swarm Node] -- OAuth 2.1 Bearer --> API[Axum REST/MCP API]
@@ -168,23 +170,23 @@ The balancer exposes an MCP-compliant endpoint at `/mcp` (JSON-RPC 2.0).
 
 ---
 
-## 🧪 Testing (E2E)
+## 🧪 Testing & Benchmarking
 
 The project uses a unified, high-performance E2E testing and benchmarking suite written in Rust.
 
-### Running the Rust E2E Suite
+### Running the Suite
 1. Ensure the Nexus Balancer is running (`cargo run`).
-2. Navigate to the test directory and run the suite:
+2. Navigate to the test directory and run:
    ```bash
    cd tests/nexus_e2e
    cargo run
    ```
 
-**The suite automatically performs:**
-- **Concurrency Test**: 30 simultaneous requests with pool isolation verification.
-- **Dynamic Key Test**: Real-time export, import, and rotation validation.
-- **MCP Validation**: JSON-RPC toolchain and resource checking.
-- **Mock Provider**: Includes an internal high-speed mock server.
+**The suite automatically validates:**
+- **Deadlock Protection**: Ensures the server remains responsive even under full pool capacity.
+- **High-Speed Concurrency**: Executes 30+ simultaneous requests with near-zero overhead.
+- **Dynamic Key Management**: Real-time export, import, and rotation validation.
+- **Internal Mocking**: Includes an embedded high-speed mock provider for isolated testing.
 
 ---
 

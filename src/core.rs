@@ -94,8 +94,8 @@ impl KeyPool {
         Self { sender, receiver }
     }
 
-    pub async fn add_key(&self, key: ApiKey) {
-        self.sender.send(key).await.expect("Channel closed");
+    pub fn add_key(&self, key: ApiKey) -> Result<(), String> {
+        self.sender.try_send(key).map_err(|_| "Pool capacity exceeded".to_string())
     }
 
     pub async fn acquire(&self) -> ApiKey {
