@@ -1,5 +1,24 @@
 /target
 /secrets
+.env
 *.env
 .DS_Store
 Thumbs.db
+
+# SQLite
+nexus.db
+nexus.db-shm
+nexus.db-wal
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
