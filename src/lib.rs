@@ -5,6 +5,7 @@ pub mod api;
 pub mod auth;
 pub mod mcp;
 pub mod db;
+pub mod utils;
 
 use anyhow::Result;
 use crate::config::AppConfig;
@@ -31,7 +32,12 @@ pub async fn run_server(config: AppConfig, db: Database, storage_path: &str) -> 
             let secret = storage.load_secret(&key_cfg.secret_name)?;
             let key = ApiKey::new(
                 &key_cfg.id,
-                key_cfg.limit,
+                key_cfg.rps_limit,
+                key_cfg.rpd_limit,
+                key_cfg.tpm_limit,
+                key_cfg.tpd_limit,
+                key_cfg.max_request_tokens,
+                key_cfg.cooldown_on_limit.unwrap_or(false),
                 secret,
                 key_cfg.secret_type.clone(),
                 None,

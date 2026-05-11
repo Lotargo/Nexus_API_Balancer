@@ -22,7 +22,12 @@ pub struct AuthConfig {
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct KeyConfig {
     pub id: String,
-    pub limit: u32,
+    pub rps_limit: Option<u32>,
+    pub rpd_limit: Option<u32>,
+    pub tpm_limit: Option<u32>,
+    pub tpd_limit: Option<u32>,
+    pub max_request_tokens: Option<u32>,
+    pub cooldown_on_limit: Option<bool>,
     pub concurrency: usize,
     pub secret_name: String,
     pub secret_type: String,

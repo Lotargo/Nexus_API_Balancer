@@ -9,24 +9,33 @@ pub struct Database {
     pub pool: SqlitePool,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema, Default)]
 pub struct LogEntry {
     pub client_id: Option<String>,
     pub key_id: Option<String>,
     pub pool_id: Option<String>,
     pub status: String,
     pub latency_ms: Option<i64>,
+    pub tokens_used: u32,
     pub error_message: Option<String>,
     pub request_ip: Option<String>,
 }
 
 impl Database {
     pub async fn new(db_url: &str) -> Result<Self> {
-        let opts = SqliteConnectOptions::from_str(db_url)?
+        let mut opts = SqliteConnectOptions::from_str(db_url)?
             .create_if_missing(true);
+        
+        if db_url.contains(":memory:") {
+            opts = opts.shared_cache(true);
+        }
 
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
+            .after_connect(|conn, _meta| Box::pin(async move {
+                sqlx::query("PRAGMA foreign_keys = OFF").execute(conn).await?;
+                Ok(())
+            }))
             .connect_with(opts)
             .await?;
 
@@ -38,14 +47,15 @@ impl Database {
 
     pub async fn log_request(&self, entry: LogEntry) -> Result<()> {
         sqlx::query(
-            "INSERT INTO request_logs (client_id, key_id, pool_id, status, latency_ms, error_message, request_ip)
-             VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO request_logs (client_id, key_id, pool_id, status, latency_ms, tokens_used, error_message, request_ip)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(entry.client_id)
         .bind(entry.key_id)
         .bind(entry.pool_id)
         .bind(entry.status)
         .bind(entry.latency_ms)
+        .bind(entry.tokens_used)
         .bind(entry.error_message)
         .bind(entry.request_ip)
         .execute(&self.pool)
@@ -59,6 +69,11 @@ impl Database {
             .fetch_one(&self.pool)
             .await?;
 
+        let total_tokens: i64 = sqlx::query_scalar("SELECT SUM(tokens_used) FROM request_logs")
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0);
+
         let success_rate: f64 = sqlx::query_scalar(
             "SELECT CAST(COUNT(*) AS FLOAT) / (SELECT COUNT(*) FROM request_logs) FROM request_logs WHERE status = 'success'"
         )
@@ -68,6 +83,7 @@ impl Database {
 
         Ok(serde_json::json!({
             "total_requests": total_requests,
+            "total_tokens": total_tokens,
             "success_rate": success_rate,
         }))
     }

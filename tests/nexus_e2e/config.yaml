@@ -16,14 +16,14 @@ pools:
   capacity: 20
   keys:
   - id: OPENAI_MOCK
-    limit: 100
+    rps_limit: 100
+    rpd_limit: null
+    tpm_limit: null
+    tpd_limit: null
+    max_request_tokens: null
+    cooldown_on_limit: true
     concurrency: 5
     secret_name: openai_mock_key
-    secret_type: api_key
-  - id: RUST_E2E_KEY
-    limit: 100
-    concurrency: 2
-    secret_name: rust_e2e_secret
     secret_type: api_key
 - name: gemini-pool
   description: Mock Gemini Pool
@@ -32,7 +32,12 @@ pools:
   capacity: 20
   keys:
   - id: GEMINI_MOCK
-    limit: 100
+    rps_limit: 100
+    rpd_limit: null
+    tpm_limit: null
+    tpd_limit: null
+    max_request_tokens: null
+    cooldown_on_limit: true
     concurrency: 5
     secret_name: gemini_mock_key
     secret_type: api_key
@@ -43,7 +48,44 @@ pools:
   capacity: 20
   keys:
   - id: ANTHROPIC_MOCK
-    limit: 100
+    rps_limit: 100
+    rpd_limit: null
+    tpm_limit: null
+    tpd_limit: null
+    max_request_tokens: null
+    cooldown_on_limit: true
     concurrency: 5
     secret_name: anthropic_mock_key
+    secret_type: api_key
+- name: limit-pool
+  description: Pool for RPS testing
+  provider: openai
+  target_url: http://127.0.0.1:8085
+  capacity: 5
+  keys:
+  - id: STRICT_RPS_KEY
+    rps_limit: 2
+    rpd_limit: null
+    tpm_limit: null
+    tpd_limit: null
+    max_request_tokens: null
+    cooldown_on_limit: true
+    concurrency: 1
+    secret_name: strict_secret
+    secret_type: api_key
+- name: gemini-real
+  description: Real Gemini Flash Lite
+  provider: google
+  target_url: https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent
+  capacity: 10
+  keys:
+  - id: GEMINI_REAL_KEY
+    rps_limit: 10
+    rpd_limit: null
+    tpm_limit: null
+    tpd_limit: null
+    max_request_tokens: null
+    cooldown_on_limit: true
+    concurrency: 2
+    secret_name: gemini_real_key
     secret_type: api_key
