@@ -1,6 +1,57 @@
+<div align="center">
+
 # Nexus API Balancer
 
-Rust-based proxy and key balancer for AI providers. It routes requests through named pools, injects provider credentials, enforces per-key limits, and logs usage to SQLite.
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+[![OAuth 2.1](https://img.shields.io/badge/Security-OAuth_2.1-green.svg)](https://oauth.net/2.1/)
+[![MCP](https://img.shields.io/badge/Protocol-MCP-green.svg)](https://modelcontextprotocol.io/)
+[![Scalar](https://img.shields.io/badge/Docs-Scalar-green.svg)](https://scalar.com/)
+[![SQLx](https://img.shields.io/badge/Database-SQLx-green.svg)](https://github.com/launchbadge/sqlx)
+
+**Rust-based proxy and key balancer for AI providers. It routes requests through named pools, injects provider credentials, enforces per-key limits, and logs usage to SQLite..**  
+_Secure, Scalable, and MCP-ready._
+
+</div>
+
+---
+
+## Features
+
+- **High Concurrency**: Asynchronous pool management using `tokio` and `async-channel`.
+- **Persistent Storage**: SQLite integration for tracking pools, keys, and clients with full transactionality.
+- **Observability**: Detailed request logging for analytics, latency tracking, and error auditing.
+- **Admin Protection**: Dedicated administrative layer secured via `.env` secrets and `X-Admin-Key` headers.
+- **Client Isolation**: Strict partitioning ensures clients only see and access their assigned pools.
+- **Transparent Proxy**: Automatic header injection for OpenAI, Anthropic, and Google Gemini providers.
+- **OAuth 2.1 & Hybrid Auth**: Mandatory token validation with Master Key and Public Registration options.
+- **Dynamic Key Management**: Export/Import provider keys via API with zero-downtime persistence.
+- **MCP Enabled**: Integrated Model Context Protocol server with advanced key management tools.
+- **Interactive Documentation**: Premium API explorer via **Scalar** available at `/scalar`.
+- **Graceful Shutdown**: Proper signal handling (Ctrl+C) for clean termination and resource cleanup.
+- **Dynamic Configuration**: Hot-reloading of configuration via `ArcSwap` and secure API.
+
+---
+
+## Architecture
+
+Nexus Balancer is built with a **Library + Binary** architecture, making it easy to integrate into other Rust projects or test extensively using native integration tools.
+
+```mermaid
+graph TD
+    Client[AI Client / Swarm Node] -- OAuth 2.1 Bearer --> API[Axum REST/MCP API]
+    Admin[Administrator] -- X-Admin-Key --> API
+    API -- Extract Claims --> Auth[Auth Manager]
+    Auth -- Validate JWT / Admin Secret --> API
+    API -- Isolation Filter --> DB[(SQLite DB)]
+    API -- Acquire Slot --> Pool[Key Pool]
+    Pool -- Shared State --> Key[API Key Inner]
+    Key -- Check RPS/TTL/Ban --> Pool
+    Pool -- Slot Granted --> Worker[Worker Thread]
+    Worker -- Execute Request --> Provider[External API Provider]
+    Worker -- Release Slot --> Pool
+    API -- Async Log --> DB
+```
 
 ## What it does
 
