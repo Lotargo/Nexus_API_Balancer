@@ -1,9 +1,9 @@
 use axum::{
     extract::{State, FromRequestParts, Path},
-    http::{request::Parts, StatusCode, header::AUTHORIZATION, Method, HeaderMap},
+    http::{request::Parts, StatusCode, header::AUTHORIZATION, Method, HeaderMap, Response},
     routing::{get, post, any},
     response::IntoResponse,
-    body::to_bytes,
+    body::{to_bytes, Body},
     Json, Router,
     async_trait,
 };
@@ -20,6 +20,21 @@ use crate::db::{Database, LogEntry};
 use utoipa::{OpenApi, ToSchema};
 use std::time::Duration;
 use tokio::time::{sleep, Instant};
+
+fn is_hop_by_hop_header(name: &axum::http::HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "content-length"
+    )
+}
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ExecuteRequest {
@@ -207,6 +222,7 @@ pub fn create_router(
         .route("/admin/clients", post(handle_register_client))
         .route("/admin/keys/:pool_name/:key_id", get(handle_export_key))
         .route("/admin/keys/:pool_name", post(handle_import_key))
+        .route("/proxy/:pool_name", any(handle_proxy))
         .route("/proxy/:pool_name/*path", any(handle_proxy))
         .route("/mcp", post(handle_mcp))
         .with_state(state)
@@ -292,6 +308,7 @@ async fn handle_execute(
             latency_ms: Some(start.elapsed().as_millis() as i64),
             error_message: Some(e.to_string()),
             request_ip: None,
+            tokens_used: 0,
         }).await;
 
         return Json(response);
@@ -317,6 +334,7 @@ async fn handle_execute(
         latency_ms: Some(start.elapsed().as_millis() as i64),
         error_message: None,
         request_ip: None,
+        tokens_used: 0,
     }).await;
 
     Json(result)
@@ -498,7 +516,12 @@ async fn handle_import_key(
         if let Some(pool) = state.pools.get(&pool_name) {
             let key = crate::core::ApiKey::new(
                 &payload.key.id,
-                payload.key.limit,
+                payload.key.rps_limit,
+                payload.key.rpd_limit,
+                payload.key.tpm_limit,
+                payload.key.tpd_limit,
+                payload.key.max_request_tokens,
+                payload.key.cooldown_on_limit.unwrap_or(false),
                 payload.secret,
                 payload.key.secret_type.clone(),
                 None,
@@ -692,12 +715,17 @@ async fn handle_mcp(
 /// Transparent Proxy Handler
 async fn handle_proxy(
     State(state): State<Arc<AppState>>,
-    _token: AuthToken, // Ensure client is authenticated
+    token: AuthToken,
     method: Method,
-    Path((pool_name, path)): Path<(String, String)>,
+    Path(params): Path<HashMap<String, String>>,
     headers: HeaderMap,
-    body: axum::body::Body,
+    body: Body,
 ) -> impl axum::response::IntoResponse {
+    let Some(pool_name) = params.get("pool_name").cloned() else {
+        return (StatusCode::BAD_REQUEST, "Missing pool name").into_response();
+    };
+    let path = params.get("path").cloned().unwrap_or_default();
+
     let config = state.config.load();
     let pool_cfg = config.pools.iter().find(|p| p.name == pool_name);
 
@@ -707,19 +735,44 @@ async fn handle_proxy(
 
     let target_base = &pool_cfg.unwrap().target_url;
     let provider = &pool_cfg.unwrap().provider;
-    let target_url = format!("{}/{}", target_base.trim_end_matches('/'), path);
-
+    
+    let target_url = if path.is_empty() || path == "/" {
+        target_base.clone()
+    } else {
+        format!("{}/{}", target_base.trim_end_matches('/'), path.trim_start_matches('/'))
+    };
     // Acquire key from the specific pool
     let pool = match state.pools.get(&pool_name) {
         Some(p) => p,
         None => return (StatusCode::NOT_FOUND, "Pool implementation not found").into_response(),
     };
     let key = pool.acquire().await;
+    let key_id = key.id();
+
+    let body_bytes = to_bytes(body, 25 * 1024 * 1024).await.unwrap_or_default();
+    let input_tokens = if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+        crate::utils::estimate_request_tokens(&json) as u32
+    } else {
+        0
+    };
+
+    if let Some(limit) = key.max_request_tokens() {
+        if input_tokens > limit {
+            pool.release(key).await;
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("Request token estimate {} exceeds per-request limit {}", input_tokens, limit),
+            ).into_response();
+        }
+    }
+
+    // Check limits
+    if let Err(e) = key.try_use() {
+        pool.release(key).await;
+        return (StatusCode::TOO_MANY_REQUESTS, format!("Rate limit exceeded for key {}: {}", key_id, e)).into_response();
+    }
     
     // Get actual secret from storage
-    // Actually, KeyConfig has secret_name. We need to load it.
-    // BUT we don't store SecretStorage in AppState yet.
-    // Let's assume the secret is already in the ApiKeyInner (we added it as _secret earlier).
     let secret = {
         let inner = key.inner.lock().unwrap();
         inner._secret.clone()
@@ -745,24 +798,61 @@ async fn handle_proxy(
         // Default to OpenAI-compatible Bearer token
         req_builder = req_builder.header(AUTHORIZATION, format!("Bearer {}", secret));
     }
-    
-    let body_bytes = to_bytes(body, 25 * 1024 * 1024).await.unwrap_or_default(); // 25MB limit
+
     let res = req_builder.body(body_bytes).send().await;
 
-    pool.release(key).await;
-
     match res {
-        Ok(response) => {
-            let status = response.status();
-            let mut res_builder = axum::response::Response::builder().status(status);
+        Ok(resp) => {
+            let status = resp.status();
+            let mut res_builder = Response::builder().status(status);
             
-            for (name, value) in response.headers().iter() {
-                res_builder = res_builder.header(name, value);
+            for (name, value) in resp.headers().iter() {
+                if !is_hop_by_hop_header(name) {
+                    res_builder = res_builder.header(name, value);
+                }
             }
 
-            let body_bytes = response.bytes().await.unwrap_or_default();
-            res_builder.body(axum::body::Body::from(body_bytes)).unwrap().into_response()
+            let bytes = resp.bytes().await.unwrap_or_default();
+            
+            let mut output_tokens = 0;
+            // Attempt to track tokens from response usage
+            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                // OpenAI style usage
+                if let Some(total) = json.get("usage").and_then(|u| u.get("total_tokens")).and_then(|t| t.as_u64()) {
+                    output_tokens = total as u32;
+                } 
+                // Gemini style usageMetadata
+                else if let Some(total) = json.get("usageMetadata").and_then(|u| u.get("totalTokenCount")).and_then(|t| t.as_u64()) {
+                    output_tokens = total as u32;
+                }
+                // Fallback: estimate from JSON response body
+                else {
+                    output_tokens = crate::utils::estimate_response_tokens(&json) as u32;
+                }
+            }
+
+            let total_tokens = if output_tokens > input_tokens { output_tokens } else { input_tokens + output_tokens };
+            key.record_usage(total_tokens);
+
+            state.pools.get(&pool_name).unwrap().release(key).await;
+            
+            // Log to DB
+            if let Err(e) = state.db.log_request(crate::db::LogEntry {
+                client_id: Some(token.0.sub.clone()),
+                key_id: Some(key_id),
+                pool_id: Some(pool_name),
+                status: if status.is_success() { "success".to_string() } else { status.as_str().to_string() },
+                tokens_used: total_tokens,
+                ..Default::default()
+            }).await {
+                eprintln!("Failed to log request to DB: {}", e);
+            }
+
+            res_builder.body(Body::from(bytes)).unwrap().into_response()
         }
-        Err(e) => (StatusCode::BAD_GATEWAY, format!("Proxy error: {}", e)).into_response(),
+        Err(e) => {
+            state.pools.get(&pool_name).unwrap().release(key).await;
+            (StatusCode::BAD_GATEWAY, format!("Upstream error: {}", e)).into_response()
+        }
     }
 }

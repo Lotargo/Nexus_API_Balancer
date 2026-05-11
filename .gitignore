@@ -11,13 +11,6 @@ nexus.db
 nexus.db-shm
 nexus.db-wal
 
-# Python (Cleanup)
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.pytest_cache/
-
 # IDEs
 .vscode/
 .idea/
@@ -26,3 +19,6 @@ __pycache__/
 
 # Project specific
 tests/nexus_e2e/target
+
+# Migration
+migrations/*
