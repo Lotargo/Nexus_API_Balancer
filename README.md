@@ -5,9 +5,9 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![OAuth 2.1](https://img.shields.io/badge/Security-OAuth_2.1-green.svg)](https://oauth.net/2.1/)
-[![MCP](https://img.shields.io/badge/Protocol-MCP-green.svg)](https://modelcontextprotocol.io/)
-[![Scalar](https://img.shields.io/badge/Docs-Scalar-green.svg)](https://scalar.com/)
-[![SQLx](https://img.shields.io/badge/Database-SQLx-green.svg)](https://github.com/launchbadge/sqlx)
+[![MCP](https://img.shields.io/badge/Protocol-MCP-red.svg)](https://modelcontextprotocol.io/)
+[![Scalar](https://img.shields.io/badge/Docs-Scalar-yellow.svg)](https://scalar.com/)
+[![SQLx](https://img.shields.io/badge/Database-SQLx-blue.svg)](https://github.com/launchbadge/sqlx)
 
 **Rust-based high-performance proxy and intelligent key balancer for AI providers. Features context caching, detailed latency tracing, and client isolation.**  
 _Secure, Scalable, and optimized for Large Language Models._
@@ -47,6 +47,7 @@ graph TD
 ## 🛠️ Getting Started
 
 ### 1. Installation
+
 ```bash
 cp .env.example .env
 cp config.yaml.example config.yaml
@@ -54,16 +55,20 @@ mkdir -p secrets
 ```
 
 ### 2. Adding Keys
+
 You can now add multiple keys to a single file:
+
 ```bash
 # secrets/gemini_pool
 AIzaSy...key_1
 AIzaSy...key_2
 AIzaSy...key_3
 ```
+
 Nexus will automatically register these as `GEMINI_KEY#1`, `GEMINI_KEY#2`, etc., and rotate between them.
 
 ### 3. Running
+
 ```bash
 cargo run
 ```
@@ -73,10 +78,12 @@ cargo run
 ## 💎 KV Cache (Context Caching)
 
 Nexus supports per-client KV Cache toggling. When enabled for a specific pool:
+
 1. Requests are automatically routed to the `v1beta` endpoint (required for Gemini Context Caching).
 2. The balancer prioritizes stability for long-context interactions.
 
 **To enable via API:**
+
 ```json
 POST /admin/keys/api-gemini-pool
 {
@@ -109,7 +116,7 @@ Every request logs detailed timing info:
 
 ## 📖 API Documentation
 
-Full interactive documentation is available at `http://localhost:3000/scalar` once the server is running.
+Full interactive documentation is available at `http://localhost:3317/scalar` once the server is running.
 
 ## 📜 License
 

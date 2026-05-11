@@ -71,9 +71,19 @@ impl AppConfig {
     }
 
     pub fn load(path: &str) -> Result<Self> {
-
         let content = fs::read_to_string(path)?;
-        let config: AppConfig = serde_yaml::from_str(&content)?;
+        let mut config: AppConfig = serde_yaml::from_str(&content)?;
+
+        // Override with environment variables if present
+        if let Ok(host) = std::env::var("HOST") {
+            config.server.host = host;
+        }
+        if let Ok(port_str) = std::env::var("PORT") {
+            if let Ok(port) = port_str.parse::<u16>() {
+                config.server.port = port;
+            }
+        }
+
         Ok(config)
     }
 

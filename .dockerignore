@@ -1,0 +1,23 @@
+# Ignore all target directories (root and nested)
+**/target/
+
+# Ignore git metadata
+.git/
+
+# Ignore local environment and database files
+.env
+*.db
+*.db-shm
+*.db-wal
+
+# Ignore secrets and logs
+secrets/
+*.log
+
+# Ignore tests and examples (not needed for production binary)
+tests/
+examples/
+
+# Ignore temporary files
+.antigravity/
+.gemini/

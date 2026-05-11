@@ -1,0 +1,21 @@
+services:
+  nexus-balancer:
+    build: .
+    image: nexus-balancer:latest
+    container_name: nexus-api-balancer
+    ports:
+      - "3317:3317"
+    volumes:
+      # Mount configuration files
+      # Note: Ensure these files exist on the host before running docker-compose up
+      - ./config.yaml:/app/config.yaml
+      - ./.env:/app/.env
+      # Persistent storage for the SQLite database
+      - ./data:/app/data
+      # Mount secrets directory if you use file-based keys
+      - ./secrets:/app/secrets
+    environment:
+      - DATABASE_URL=sqlite:/app/data/nexus.db
+      - HOST=0.0.0.0
+      - PORT=3317
+    restart: unless-stopped
