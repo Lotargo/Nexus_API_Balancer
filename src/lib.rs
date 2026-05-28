@@ -26,7 +26,17 @@ pub async fn run_server(config: AppConfig, db: Database, storage_path: &str) -> 
     let mut pools = HashMap::new();
 
     for pool_cfg in &config.pools {
-        let pool = KeyPool::new(pool_cfg.capacity);
+        // Automatically calculate required capacity to prevent capacity exceeded errors
+        let mut required_capacity = 0;
+        for key_cfg in &pool_cfg.keys {
+            let secret_count = storage.load_secret(&key_cfg.secret_name)
+                .map(|content| content.lines().map(|s| s.trim()).filter(|s| !s.is_empty()).count())
+                .unwrap_or(1);
+            required_capacity += secret_count * key_cfg.concurrency;
+        }
+        let final_capacity = std::cmp::max(pool_cfg.capacity, required_capacity);
+
+        let pool = KeyPool::new(final_capacity);
         for key_cfg in &pool_cfg.keys {
             let secret_content = storage.load_secret(&key_cfg.secret_name)?;
             // Support multiple keys per file (one per line)
