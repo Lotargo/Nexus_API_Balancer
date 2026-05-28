@@ -39,12 +39,32 @@ fn is_hop_by_hop_header(name: &axum::http::HeaderName) -> bool {
 }
 
 fn build_target_url(target_base: &str, path: &str, query: Option<&str>) -> String {
-    let mut url = if path.is_empty() || path == "/" {
-        target_base.to_string()
-    } else if target_base.ends_with('/') {
-        format!("{}{}", target_base, path.trim_start_matches('/'))
+    // Avoid doubling the version prefix (e.g. /v1) if the path already includes it
+    let clean_path = path.trim_start_matches('/');
+    let target_trimmed = target_base.trim_end_matches('/');
+
+    let mut final_path = clean_path.to_string();
+
+    // List of common API versions
+    let versions = ["v1", "v1beta", "v2"];
+    for v in versions {
+        let path_starts_with_v = clean_path.starts_with(&format!("{}/", v)) || clean_path == v;
+        let target_ends_with_v = target_trimmed.ends_with(&format!("/{}", v));
+
+        if path_starts_with_v && target_ends_with_v {
+            // Strip the version from path since it's already in the target
+            final_path = clean_path.replacen(&format!("{}/", v), "", 1);
+            if final_path == v {
+                final_path = "".to_string();
+            }
+            break;
+        }
+    }
+
+    let mut url = if final_path.is_empty() {
+        target_trimmed.to_string()
     } else {
-        format!("{}/{}", target_base, path.trim_start_matches('/'))
+        format!("{}/{}", target_trimmed, final_path)
     };
 
     if let Some(query) = query.filter(|q| !q.is_empty()) {
@@ -120,6 +140,20 @@ mod tests {
             url,
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:streamGenerateContent?alt=sse"
         );
+
+        let url2 = build_target_url(
+            "https://api.mistral.ai/v1",
+            "/v1/chat/completions",
+            None,
+        );
+        assert_eq!(url2, "https://api.mistral.ai/v1/chat/completions");
+
+        let url3 = build_target_url(
+            "https://api.openai.com/v1/",
+            "v1/models",
+            None,
+        );
+        assert_eq!(url3, "https://api.openai.com/v1/models");
     }
 
     #[test]
@@ -891,6 +925,14 @@ async fn handle_unified_proxy(
     // We create a new Path params map for handle_proxy
     let mut params = HashMap::new();
     params.insert("pool_name".to_string(), pool_name);
+
+    // the request path may already contain `/v1` prefix from unified routing
+    // e.g. `/v1/chat/completions`. We pass it entirely to handle_proxy_internal.
+    // handle_proxy_internal will append this to the target_url.
+    // if target_url is `https://api.mistral.ai/v1`, it becomes `https://api.mistral.ai/v1/v1/chat/completions`.
+    // to fix this, strip `/v1` if target_url also ends with `/v1`.
+    // We do this cleanup inside `build_target_url` to be safe for all providers.
+
     params.insert("path".to_string(), path);
 
     handle_proxy_internal(state, token, method, params, uri, headers, body_bytes).await
