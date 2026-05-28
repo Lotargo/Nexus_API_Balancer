@@ -862,6 +862,10 @@ async fn handle_unified_proxy(
             find_pool(&["google", "gemini"])
         } else if model_low.starts_with("deepseek-") {
             find_pool(&["deepseek"])
+        } else if model_low.starts_with("mistral-") || model_low.starts_with("codestral-") || model_low.starts_with("pixtral-") || model_low.starts_with("ministral-") || model_low.starts_with("open-mixtral-") {
+            find_pool(&["mistral"])
+        } else if model_low.starts_with("llama") || model_low.starts_with("gemma") {
+            find_pool(&["groq", "cerebras"])
         } else {
             None
         }
