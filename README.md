@@ -128,6 +128,7 @@ cargo run
 ### Настройка в OpenCode
 
 **Способ 1: OpenAI Compatible (по умолчанию)**
+
 1. Откройте настройки расширения OpenCode.
 2. Установите следующие значения в конфигурации:
    - URL эндпоинта: `http://localhost:3317`
@@ -141,6 +142,7 @@ cargo run
 
 **Способ 2: Пользовательский провайдер (Custom Provider)**
 В разделе "Пользовательский провайдер" можно настроить прямое обращение к эндпоинтам.
+
 1. Включите опцию: **Использовать пользовательский URL для вызова API**.
 2. В поле **Пользовательский URL для вызова API** введите: `http://localhost:3317/v1/chat/completions`
 3. Включите опцию: **Передавать ключ API в заголовках пользовательского вызова**.
@@ -162,7 +164,13 @@ cargo run
   "mcpServers": {
     "nexus-balancer": {
       "command": "cargo",
-      "args": ["run", "--manifest-path", "/путь/к/nexus_balancer/Cargo.toml", "--", "mcp"],
+      "args": [
+        "run",
+        "--manifest-path",
+        "/путь/к/nexus_balancer/Cargo.toml",
+        "--",
+        "mcp"
+      ],
       "env": {
         "DATABASE_URL": "sqlite:/путь/к/nexus.db"
       }
@@ -177,9 +185,18 @@ cargo run
 
 ```json
 {
-  "nexus-balancer": {
-    "command": "cargo",
-    "args": ["run", "--manifest-path", "/путь/к/nexus_balancer/Cargo.toml", "--", "mcp"]
+  "mcpServers": {
+    "nexus-balancer": {
+      "command": "cargo",
+      "args": [
+        "run",
+        "--quiet",
+        "--manifest-path",
+        "/путь/к/nexus_balancer/Cargo.toml",
+        "--",
+        "mcp"
+      ]
+    }
   }
 }
 ```
