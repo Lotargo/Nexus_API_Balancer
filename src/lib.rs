@@ -6,6 +6,7 @@ pub mod auth;
 pub mod mcp;
 pub mod db;
 pub mod utils;
+pub mod mcp_client;
 
 use anyhow::Result;
 use crate::config::AppConfig;
