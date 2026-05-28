@@ -72,6 +72,12 @@ impl AppConfig {
     }
 
     pub fn load(path: &str) -> Result<Self> {
+        // Validate path to prevent Path Traversal
+        let path_obj = std::path::Path::new(path);
+        if path_obj.components().any(|x| x == std::path::Component::ParentDir) {
+            return Err(anyhow::anyhow!("Invalid path: Path traversal detected"));
+        }
+
         let content = fs::read_to_string(path)?;
         let mut config: AppConfig = serde_yaml::from_str(&content)?;
 
@@ -89,6 +95,12 @@ impl AppConfig {
     }
 
     pub fn save(&self, path: &str) -> Result<()> {
+        // Validate path to prevent Path Traversal
+        let path_obj = std::path::Path::new(path);
+        if path_obj.components().any(|x| x == std::path::Component::ParentDir) {
+            return Err(anyhow::anyhow!("Invalid path: Path traversal detected"));
+        }
+
         let content = serde_yaml::to_string(self)?;
         fs::write(path, content)?;
         Ok(())
