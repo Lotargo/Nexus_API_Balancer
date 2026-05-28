@@ -57,8 +57,8 @@ impl AppConfig {
             "openai" => Some("https://api.openai.com/v1"),
             "gemini" | "google" => Some("https://generativelanguage.googleapis.com"),
             "grok" | "xai" => Some("https://api.x.ai/v1"),
+            "groq" => Some("https://api.groq.com/openai/v1"),
             "cerebras" => Some("https://api.cerebras.ai/v1"),
-            "sambanova" => Some("https://api.sambanova.ai/v1"),
             "cohere" => Some("https://api.cohere.com/v2"),
             "mistral" => Some("https://api.mistral.ai/v1"),
             "deepseek" => Some("https://api.deepseek.com"),
@@ -67,7 +67,7 @@ impl AppConfig {
     }
 
     pub fn get_supported_providers() -> Vec<&'static str> {
-        vec!["openai", "gemini", "grok", "cerebras", "sambanova", "cohere", "mistral", "deepseek"]
+        vec!["openai", "gemini", "grok", "groq", "cerebras", "cohere", "mistral", "deepseek"]
     }
 
     pub fn load(path: &str) -> Result<Self> {

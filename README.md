@@ -1,5 +1,3 @@
-<div align="center">
-
 # Nexus API Balancer
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
@@ -9,44 +7,44 @@
 [![Scalar](https://img.shields.io/badge/Docs-Scalar-yellow.svg)](https://scalar.com/)
 [![SQLx](https://img.shields.io/badge/Database-SQLx-blue.svg)](https://github.com/launchbadge/sqlx)
 
-**Rust-based high-performance proxy and intelligent key balancer for AI providers. Features context caching, detailed latency tracing, and client isolation.**  
-_Secure, Scalable, and optimized for Large Language Models._
-
-</div>
+Nexus API Balancer — это высокопроизводительный прокси-сервер и интеллектуальный балансировщик ключей для различных AI-провайдеров на базе Rust. Система предоставляет возможности контекстного кэширования, детального логирования задержек, динамической балансировки нагрузки и изоляции клиентов.
 
 ---
 
-## 🚀 Key Features
-
-- **High Concurrency**: Asynchronous pool management using `tokio` and `async-channel`.
-- **Intelligent KV Cache**: Flexible Context Caching toggle per client-pool with automatic `v1beta` endpoint transformation for Google Gemini.
-- **Detailed Latency Tracing**: High-precision logging of `Acquire` (key retrieval) and `Total` (upstream response) times with sub-millisecond timestamps.
-- **Multi-Key Secrets**: Support for loading multiple API keys from a single file (one per line) with automatic unique ID generation (`#1`, `#2`, etc.).
-- **Client-Isolated Storage**: Dynamic key partitioning ensures client secrets are stored in isolated directories (`secrets/<client_id>/`).
-- **MCP Native**: Full Model Context Protocol support for dynamic pool discovery and administrative key management.
-- **Observability**: Real-time debug logs with high-resolution timestamps and body size metrics for performance tuning.
-- **Admin Protection**: Dedicated administrative layer secured via `.env` secrets and `X-Admin-Key` headers.
-- **Interactive Documentation**: Premium API explorer via **Scalar** available at `/scalar`.
-
----
-
-## 🏗️ Architecture
+## Архитектура системы
 
 ```mermaid
 graph TD
-    Client[AI Client / Roo Code] -- OAuth 2.1 Bearer --> API[Axum REST/MCP API]
-    Admin[Administrator] -- X-Admin-Key --> API
-    API -- Auth Check --> DB[(SQLite DB)]
-    API -- KV Cache Check --> DB
-    API -- Acquire Key --> Pool[Key Pool]
-    Pool -- Load From --> Storage[Isolated Storage]
-    API -- v1beta Transform --> Provider[Gemini / OpenAI / Anthropic]
-    API -- Latency Trace --> Log[Console/DB]
+    Client[AI Клиент / Cline / Roo Code] -- OAuth 2.1 Bearer --> API[Axum REST/MCP API]
+    Admin[Администратор] -- X-Admin-Key --> API
+    API -- Проверка авторизации --> DB[(SQLite DB)]
+    API -- Проверка KV-кэша --> DB
+    API -- Получение ключа --> Pool[Пул ключей]
+    Pool -- Загрузка из хранилища --> Storage[Изолированное хранилище]
+    API -- Преобразование v1beta --> Provider[Gemini / OpenAI / Anthropic / Groq / Mistral / Cerebras]
+    API -- Логирование задержки --> Log[Консоль/БД]
 ```
 
-## 🛠️ Getting Started
+---
 
-### 1. Installation
+## Основные возможности
+
+- **Высокая параллелизация**: Эффективное асинхронное управление пулами запросов с использованием `tokio` и `async-channel`.
+- **Единый шлюз маршрутизации**: Автоматическое перенаправление запросов на нужных провайдеров на основе запрашиваемой модели.
+- **Поддержка множества провайдеров**: Из коробки поддерживаются OpenAI, Google Gemini, Anthropic Claude, Groq, Mistral, Cerebras, Cohere, DeepSeek и xAI (Grok).
+- **Интеллектуальный KV Cache**: Управление кэшем контекста для каждого пула с автоматической трансформацией эндпоинтов (например, для Google Gemini v1beta).
+- **Мультиключевые секреты**: Возможность загрузки нескольких API-ключей из одного файла (по одному ключу на строку) с автоматической генерацией уникальных идентификаторов и ротацией между ними.
+- **Изоляция клиентов**: Безопасное разделение ключей и ограничение доступа клиентов к назначенным пулам.
+- **Поддержка протокола MCP**: Полная интеграция Model Context Protocol для динамического обнаружения пулов и администрирования.
+- **Интерактивная документация**: Встроенная интерактивная спецификация API через Scalar по адресу `/scalar`.
+
+---
+
+## Руководство по развертыванию и настройке
+
+### Шаг 1: Подготовка окружения
+
+Создайте файлы конфигурации и окружения из шаблонов, а также директорию для хранения секретов:
 
 ```bash
 cp .env.example .env
@@ -54,70 +52,116 @@ cp config.yaml.example config.yaml
 mkdir -p secrets
 ```
 
-### 2. Adding Keys
+Настройте параметры в файле `.env` (например, секреты администратора, порты и параметры подключения к БД).
 
-You can now add multiple keys to a single file:
+### Шаг 2: Конфигурация пулов и провайдеров (`config.yaml`)
 
-```bash
-# secrets/gemini_pool
-AIzaSy...key_1
-AIzaSy...key_2
-AIzaSy...key_3
+Файл `config.yaml` определяет структуру пулов и правила распределения запросов. Каждый пул привязывается к конкретному провайдеру.
+
+Пример структуры пула:
+
+```yaml
+pools:
+  - name: "openai-pool"
+    description: "Основной пул для запросов к OpenAI совместимым API"
+    provider: "openai"
+    target_url: "https://api.openai.com"
+    capacity: 20
+    keys:
+      - id: "OPENAI_KEY_GROUP"
+        secret_name: "openai_keys.txt" # Имя файла внутри директории secrets/
+        secret_type: "api_key"
+        concurrency: 5 # Максимальное количество параллельных запросов на один ключ
+        rps_limit: 10 # Лимит запросов в секунду (RPS)
+        tpm_limit: 60000 # Лимит токенов в минуту (TPM)
+        max_request_tokens: 16000 # Ограничение на максимальный размер контекста одного запроса
+        cooldown_on_limit: true # Отправлять ключ на "остывание" при превышении лимитов
 ```
 
-Nexus will automatically register these as `GEMINI_KEY#1`, `GEMINI_KEY#2`, etc., and rotate between them.
+### Шаг 3: Добавление API-ключей
 
-### 3. Running
+Ключи хранятся в изолированных текстовых файлах в директории `secrets/`. Балансировщик поддерживает как одиночные ключи, так и списки ключей.
+
+Чтобы добавить несколько ключей для пула (например, для `openai-pool`, у которого указан `secret_name: "openai_keys.txt"`):
+
+1. Создайте файл `secrets/openai_keys.txt`.
+2. Впишите ваши API-ключи, разделяя их переносом строки:
+
+```text
+sk-proj-11111111111111111111
+sk-proj-22222222222222222222
+sk-proj-33333333333333333333
+```
+
+Балансировщик автоматически считает все ключи из файла, зарегистрирует их под уникальными именами (`OPENAI_KEY_GROUP#1`, `OPENAI_KEY_GROUP#2` и т. д.) и будет равномерно распределять и ротировать запросы между ними.
+
+### Шаг 4: Запуск балансировщика
+
+Запустите проект с помощью Cargo:
 
 ```bash
 cargo run
 ```
 
+Балансировщик запустит HTTP-сервер на хосте и порту, указанных в `config.yaml` (по умолчанию `http://0.0.0.0:3317`).
+
 ---
 
-## 💎 KV Cache (Context Caching)
+## Подключение к клиентам (Cline, Roo Code, OpenCode)
 
-Nexus supports per-client KV Cache toggling. When enabled for a specific pool:
+Балансировщик предоставляет единую точку доступа (Unified Gateway) по адресу `http://localhost:3317/v1/chat/completions`, которая полностью совместима со стандартом OpenAI API. Балансировщик автоматически анализирует поле `model` в запросе и направляет его в нужный пул провайдера.
 
-1. Requests are automatically routed to the `v1beta` endpoint (required for Gemini Context Caching).
-2. The balancer prioritizes stability for long-context interactions.
+При авторизации используется токен клиента (JWT), сгенерированный при регистрации клиента, либо мастер-токен из конфигурации.
 
-**To enable via API:**
+### Настройка в Cline / Roo Code / Roo Cline
 
-```json
-POST /admin/keys/api-gemini-pool
-{
-  "key": { "id": "GEMINI_POOL", "concurrency": 5, ... },
-  "secret": "...",
-  "kv_cache": true
-}
+Для интеграции балансировщика в расширения VS Code (например, Cline или Roo Code) выполните следующие шаги:
+
+1. Откройте настройки провайдера моделей в расширении.
+2. Выберите провайдер: **OpenAI Compatible**.
+3. Укажите параметры подключения:
+   - **Base URL (API URL)**: `http://localhost:3317/v1`
+   - **API Key**: Вставьте ваш токен клиента (JWT) или мастер-ключ (например, `nexus-master-key-2026`).
+   - **Model ID**: Введите имя желаемой модели.
+4. Нажмите кнопку подключения/сохранения.
+
+### Настройка в OpenCode
+
+1. Откройте настройки расширения OpenCode.
+2. Установите следующие значения в конфигурации:
+   - URL эндпоинта: `http://localhost:3317/v1`
+   - Токен авторизации (API Key): `<ваш JWT токен клиента>`
+3. Выберите или укажите модель. Балансировщик автоматически выполнит маршрутизацию:
+   - Запросы к моделям `gpt-4`, `gpt-5`, и другие - пойдут на пулы OpenAI.
+   - Запросы к моделям `claude-4-6-sonnet`, `claude-4.7-opus` пойдут на пулы Anthropic.
+   - Запросы к моделям `gemini-3.1-pro`, `gemini-3.5-flash` пойдут на пулы Google Gemini.
+   - Запросы к моделям `mistral-large`, `codestral` пойдут на пулы Mistral.
+   - Запросы к моделям `llama-3.1`, `gpt-oss-120b` пойдут на пулы Groq или Cerebras.
+
+---
+
+## Диагностика и мониторинг
+
+Каждый проксируемый запрос логируется в режиме реального времени с указанием точных задержек:
+
+```text
+[13:14:02.795] [DEBUG] Proxy: Processing request (Body size: 137060 bytes)
+[13:14:12.264] [DEBUG] Proxy: Upstream status 200 OK, Acquire: 487.2µs, Total: 9.46s
 ```
 
----
-
-## 📊 Performance Diagnostics
-
-Every request logs detailed timing info:
-`[13:14:02.795] [DEBUG] Proxy: Processing request (Body size: 137060 bytes)`
-`[13:14:12.264] [DEBUG] Proxy: Upstream status 200 OK, Acquire: 487.2µs, Total: 9.46s`
-
-- **Acquire**: Time taken to retrieve a free key slot (should be <1ms unless pool is saturated).
-- **Total**: Total time from request entry to the first byte of upstream response.
+- **Acquire**: Время, затраченное на получение свободного ключа из пула (обычно менее 1 мс).
+- **Total**: Полное время обработки запроса сервером от момента его получения до отправки ответа клиенту.
 
 ---
 
-## 🛡️ Security
+## Безопасность и администрирование
 
-- **OAuth 2.1**: Bearer tokens are mandatory for all proxy calls.
-- **Client Isolation**: Clients can only see and use pools explicitly assigned to them in the database.
-- **Admin Bypass**: Administrators can use a master key to bypass standard limits for testing.
+- **Авторизация**: Доступ к прокси-серверу возможен только при наличии валидного заголовка `Authorization: Bearer <token>`.
+- **Изоляция секретов**: Все файлы ключей клиентов физически изолированы на уровне файловой системы.
+- **Интерактивная панель**: Для тестирования и ознакомления со всеми эндпоинтами используйте Scalar-документацию по адресу `http://localhost:3317/scalar`.
 
 ---
 
-## 📖 API Documentation
+## Лицензия
 
-Full interactive documentation is available at `http://localhost:3317/scalar` once the server is running.
-
-## 📜 License
-
-Apache-2.0. See [LICENSE](LICENSE).
+Проект распространяется под лицензией Apache-2.0. Подробности смотрите в файле [LICENSE](LICENSE).
