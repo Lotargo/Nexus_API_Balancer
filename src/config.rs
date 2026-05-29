@@ -42,6 +42,14 @@ pub struct PoolConfig {
     pub target_url: String,
     pub capacity: usize,
     pub keys: Vec<KeyConfig>,
+    /// Priority when same model exists across multiple pools (higher = preferred). Default: 0
+    #[serde(default)]
+    pub priority: i32,
+    /// Custom endpoint for model listing. Default depends on provider.
+    pub models_endpoint: Option<String>,
+    /// Skip auto-discovery for this pool. Default: false
+    #[serde(default)]
+    pub skip_model_sync: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]

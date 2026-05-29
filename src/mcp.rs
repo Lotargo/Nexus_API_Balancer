@@ -181,6 +181,9 @@ impl BalancerMcpServer {
                 target_url: target_url.clone(),
                 capacity: 20,
                 keys: vec![key_cfg.clone()],
+                priority: 0,
+                models_endpoint: None,
+                skip_model_sync: false,
             };
             
             new_config.pools.push(new_pool);

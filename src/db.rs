@@ -1,9 +1,19 @@
-use sqlx::{sqlite::{SqlitePoolOptions, SqliteConnectOptions}, SqlitePool};
+use sqlx::{sqlite::{SqlitePoolOptions, SqliteConnectOptions}, SqlitePool, Row};
 use std::str::FromStr;
 use std::collections::HashMap;
 use anyhow::Result;
 use serde::{Serialize, Deserialize};
 use utoipa::ToSchema;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderModel {
+    pub provider_name: String,
+    pub pool_name: String,
+    pub model_id: String,
+    pub owned_by: Option<String>,
+    pub context_window: Option<i64>,
+    pub capabilities: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct Database {
@@ -182,5 +192,100 @@ impl Database {
         .await?;
 
         Ok(())
+    }
+
+    pub async fn upsert_provider_model(&self, model: &ProviderModel) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO provider_models (provider_name, pool_name, model_id, owned_by, context_window, capabilities, is_stale)
+             VALUES (?, ?, ?, ?, ?, ?, 0)
+             ON CONFLICT(provider_name, model_id) DO UPDATE SET
+                pool_name = excluded.pool_name,
+                owned_by = excluded.owned_by,
+                context_window = excluded.context_window,
+                capabilities = excluded.capabilities,
+                is_stale = 0,
+                fetched_at = CURRENT_TIMESTAMP"
+        )
+        .bind(&model.provider_name)
+        .bind(&model.pool_name)
+        .bind(&model.model_id)
+        .bind(&model.owned_by)
+        .bind(model.context_window)
+        .bind(&model.capabilities)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mark_provider_stale(&self, provider_name: &str) -> Result<()> {
+        sqlx::query("UPDATE provider_models SET is_stale = 1 WHERE provider_name = ?")
+            .bind(provider_name)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn cleanup_stale_models(&self) -> Result<u64> {
+        let result = sqlx::query(
+            "DELETE FROM provider_models WHERE is_stale = 1 AND fetched_at < datetime('now', '-24 hours')"
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn find_pools_for_model(&self, model_id: &str) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query(
+            "SELECT pool_name, provider_name FROM provider_models WHERE model_id = ? AND is_stale = 0"
+        )
+        .bind(model_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| (r.get(0), r.get(1))).collect())
+    }
+
+    pub async fn get_models_by_provider(&self, provider_name: &str) -> Result<Vec<ProviderModel>> {
+        let rows = sqlx::query(
+            "SELECT provider_name, pool_name, model_id, owned_by, context_window, capabilities
+             FROM provider_models WHERE provider_name = ? AND is_stale = 0"
+        )
+        .bind(provider_name)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| ProviderModel {
+            provider_name: r.get(0),
+            pool_name: r.get(1),
+            model_id: r.get(2),
+            owned_by: r.get(3),
+            context_window: r.get(4),
+            capabilities: r.get(5),
+        }).collect())
+    }
+
+    pub async fn get_all_models(&self) -> Result<Vec<ProviderModel>> {
+        let rows = sqlx::query(
+            "SELECT provider_name, pool_name, model_id, owned_by, context_window, capabilities
+             FROM provider_models WHERE is_stale = 0
+             ORDER BY provider_name, model_id"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| ProviderModel {
+            provider_name: r.get(0),
+            pool_name: r.get(1),
+            model_id: r.get(2),
+            owned_by: r.get(3),
+            context_window: r.get(4),
+            capabilities: r.get(5),
+        }).collect())
+    }
+
+    pub async fn upsert_provider_models_batch(&self, _provider_name: &str, _pool_name: &str, models: &[ProviderModel]) -> Result<usize> {
+        let mut count = 0;
+        for model in models {
+            self.upsert_provider_model(model).await?;
+            count += 1;
+        }
+        Ok(count)
     }
 }
