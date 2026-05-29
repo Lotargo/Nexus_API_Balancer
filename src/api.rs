@@ -54,13 +54,18 @@ fn build_target_url(target_base: &str, path: &str, query: Option<&str>) -> Strin
 
     let mut final_path = clean_path.to_string();
 
+    // For Google OpenAI-compatible endpoint (/v1beta/openai/), the base URL
+    // already includes the API version. Strip any leading version prefix
+    // from the incoming OpenAI path (e.g. /v1/chat/completions -> chat/completions).
+    let is_openai_compat = target_trimmed.contains("/openai/");
+
     // List of common API versions
     let versions = ["v1", "v1beta", "v2"];
     for v in versions {
         let path_starts_with_v = clean_path.starts_with(&format!("{}/", v)) || clean_path == v;
         let target_ends_with_v = target_trimmed.ends_with(&format!("/{}", v));
 
-        if path_starts_with_v && target_ends_with_v {
+        if path_starts_with_v && (target_ends_with_v || is_openai_compat) {
             // Strip the version from path since it's already in the target
             final_path = clean_path.replacen(&format!("{}/", v), "", 1);
             if final_path == v {
@@ -1184,9 +1189,10 @@ async fn handle_proxy_internal(
 
     // Determine final target URL and headers
     let is_google = provider == "google" || provider == "gemini" || target_url.contains("googleapis.com");
+    let is_gemini_openai = is_google && target_url.contains("/openai/");
     let mut final_url = target_url;
 
-    if is_google {
+    if is_google && !is_gemini_openai {
         if kv_cache_enabled {
             // Context Caching in Gemini requires v1beta
             if final_url.contains("/v1/") {
@@ -1242,7 +1248,9 @@ async fn handle_proxy_internal(
             req_builder = req_builder.header(name.as_str(), value.as_str());
         }
 
-        if is_google {
+        if is_gemini_openai {
+            req_builder = req_builder.header(AUTHORIZATION, format!("Bearer {}", secret));
+        } else if is_google {
             req_builder = req_builder.header("x-goog-api-key", &secret);
         } else if provider == "anthropic" || provider == "claude" || final_url.contains("anthropic.com") {
             req_builder = req_builder.header("x-api-key", &secret);
