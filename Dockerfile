@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Build Stage
 FROM rust:1.95-slim-bookworm as builder
 
@@ -9,12 +10,18 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy the source code
-COPY . .
+# Copy manifests first for better layer caching
+COPY Cargo.toml Cargo.lock ./
 
-# Build the application
-# We use --release for a production-optimized binary
-RUN cargo build --release
+# Copy source code and migrations (sqlx::migrate! needs them at compile time)
+COPY src ./src
+COPY migrations ./migrations
+
+# Build with cache mounts for cargo registry and target directory
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --release && \
+    cp /app/target/release/nexus_balancer /app/nexus_balancer
 
 # Runtime Stage
 FROM debian:bookworm-slim
@@ -28,10 +35,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy the binary from the builder stage
-COPY --from=builder /app/target/release/nexus_balancer /app/nexus_balancer
-
-# Copy migrations (embedded in binary by sqlx::migrate!, but good to have if needed)
-# COPY --from=builder /app/migrations /app/migrations
+COPY --from=builder /app/nexus_balancer /app/nexus_balancer
 
 # Expose the default port
 EXPOSE 3317

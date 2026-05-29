@@ -127,7 +127,35 @@ fn extract_response_tokens(bytes: &[u8], input_tokens: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_target_url, extract_response_tokens};
+    use super::{build_target_url, extract_response_tokens, parse_explicit_model};
+
+    #[test]
+    fn parses_explicit_provider_model() {
+        // Standard //provider//model format
+        let (provider, model) = parse_explicit_model("//cerebras//llama-3.1-8b");
+        assert_eq!(provider, Some("cerebras".to_string()));
+        assert_eq!(model, "llama-3.1-8b");
+
+        // //sambanova//model
+        let (provider, model) = parse_explicit_model("//sambanova//llama-3.1-8b");
+        assert_eq!(provider, Some("sambanova".to_string()));
+        assert_eq!(model, "llama-3.1-8b");
+
+        // No prefix - passthrough
+        let (provider, model) = parse_explicit_model("mistral-large-latest");
+        assert_eq!(provider, None);
+        assert_eq!(model, "mistral-large-latest");
+
+        // Groq style with single slash - NOT matched
+        let (provider, model) = parse_explicit_model("openai/gpt-oss-120b");
+        assert_eq!(provider, None);
+        assert_eq!(model, "openai/gpt-oss-120b");
+
+        // Empty provider - not matched
+        let (provider, model) = parse_explicit_model("//model");
+        assert_eq!(provider, None);
+        assert_eq!(model, "//model");
+    }
 
     #[test]
     fn builds_target_url_with_path_and_query() {
@@ -839,6 +867,23 @@ error: if is_none { Some(serde_json::Value::String("Method not found".to_string(
     })
 }
 
+/// Parse model name for explicit provider routing: `//provider//real_model_name`
+/// Returns (explicit_provider, real_model_name).
+/// If no `//provider//` prefix, returns (None, original_model).
+fn parse_explicit_model(model: &str) -> (Option<String>, String) {
+    if model.starts_with("//") {
+        let rest = &model[2..];
+        if let Some(end) = rest.find("//") {
+            let provider = rest[..end].to_string();
+            let real_model = rest[end + 2..].to_string();
+            if !provider.is_empty() && !real_model.is_empty() {
+                return (Some(provider.to_lowercase()), real_model);
+            }
+        }
+    }
+    (None, model.to_string())
+}
+
 /// Unified Gateway Handler: Routes requests based on the 'model' field in the body
 async fn handle_unified_proxy(
     State(state): State<Arc<AppState>>,
@@ -849,8 +894,8 @@ async fn handle_unified_proxy(
     body: Body,
 ) -> impl axum::response::IntoResponse {
     let path = uri.path().to_string();
-    let body_bytes = to_bytes(body, 25 * 1024 * 1024).await.unwrap_or_default();
-    
+    let mut body_bytes = to_bytes(body, 25 * 1024 * 1024).await.unwrap_or_default();
+
     // 1. Try to detect model from body
     let mut model_name = if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
         json["model"].as_str().map(|s| s.to_string())
@@ -858,7 +903,24 @@ async fn handle_unified_proxy(
         None
     };
 
-    // 2. If not in body, try to detect from path (Google Gemini style: /v1beta/models/...)
+    // 2. Check for explicit provider routing via `//provider//model` format
+    let mut explicit_provider: Option<String> = None;
+    if let Some(ref model) = model_name.clone() {
+        let (provider, real_model) = parse_explicit_model(model);
+        if let Some(prov) = provider {
+            explicit_provider = Some(prov);
+            // Rewrite body with real model name (without //provider// prefix)
+            if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+                if let Some(obj) = json.as_object_mut() {
+                    obj.insert("model".to_string(), serde_json::Value::String(real_model.clone()));
+                    body_bytes = Bytes::from(serde_json::to_vec(&json).unwrap_or(body_bytes.to_vec()));
+                    model_name = Some(real_model);
+                }
+            }
+        }
+    }
+
+    // 3. If not in body, try to detect from path (Google Gemini style: /v1beta/models/...)
     if model_name.is_none() {
         if let Some(idx) = path.find("/models/") {
             let model_part = &path[idx + 8..];
@@ -868,7 +930,7 @@ async fn handle_unified_proxy(
         }
     }
 
-    // 3. Routing Logic: Find the best pool
+    // 4. Routing Logic: Find the best pool
     let config = state.config.load();
 
     // Get allowed pools for this client
@@ -886,7 +948,10 @@ async fn handle_unified_proxy(
             .map(|p| p.name.clone())
     };
 
-    let pool_name = if let Some(ref model) = model_name {
+    let pool_name = if let Some(ref provider) = explicit_provider {
+        // Explicit provider from //provider//model
+        find_pool(&[provider.as_str()])
+    } else if let Some(ref model) = model_name {
         let model_low = model.to_lowercase();
         if model_low.starts_with("gpt-") || model_low.starts_with("o1-") || model_low.starts_with("text-davinci") {
             find_pool(&["openai"])
@@ -921,7 +986,7 @@ async fn handle_unified_proxy(
         return (StatusCode::FORBIDDEN, "No authorized pools available for routing").into_response();
     };
 
-    // 3. Delegate to the standard proxy handler (re-using the logic)
+    // 5. Delegate to the standard proxy handler (re-using the logic)
     // We create a new Path params map for handle_proxy
     let mut params = HashMap::new();
     params.insert("pool_name".to_string(), pool_name);
