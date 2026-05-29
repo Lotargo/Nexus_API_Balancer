@@ -90,21 +90,44 @@ impl ModelRegistry {
     }
 
     async fn fetch_models(&self, pool_cfg: &crate::config::PoolConfig) -> Result<Vec<RawModel>, String> {
-        let endpoint = pool_cfg.models_endpoint.as_deref().unwrap_or("/models");
         let base_url = pool_cfg.target_url.trim_end_matches('/');
-        let url = format!("{}{}", base_url, endpoint);
+        let is_google = pool_cfg.provider == "gemini" || pool_cfg.provider == "google";
 
-        let secret = pool_cfg.keys.first()
+        // Build the models endpoint URL
+        let url = if let Some(ref ep) = pool_cfg.models_endpoint {
+            format!("{}{}", base_url, ep)
+        } else if is_google {
+            // Gemini requires /v1beta/models (not just /models)
+            format!("{}/v1beta/models", base_url)
+        } else if base_url.ends_with("/v1") || base_url.ends_with("/v2") {
+            // Provider URL already includes version prefix (e.g. https://api.mistral.ai/v1)
+            format!("{}/models", base_url)
+        } else {
+            format!("{}/v1/models", base_url)
+        };
+
+        // Extract only the FIRST key from multi-key secret files
+        let secret_raw = pool_cfg.keys.first()
             .and_then(|k| self.storage.load_secret(&k.secret_name).ok())
             .unwrap_or_default();
+        let secret = secret_raw
+            .lines()
+            .map(|s| s.trim())
+            .find(|s| !s.is_empty())
+            .unwrap_or_default();
 
-        let is_google = pool_cfg.provider == "gemini" || pool_cfg.provider == "google";
+        if secret.is_empty() {
+            return Err("No API key available for model discovery".to_string());
+        }
+
         let mut req = self.http_client.get(&url);
 
         if is_google {
-            req = req.header("x-goog-api-key", secret.trim());
+            // Gemini uses query param ?key= as primary auth
+            let url_with_key = format!("{}?key={}", url, secret);
+            req = self.http_client.get(&url_with_key);
         } else {
-            req = req.header("Authorization", format!("Bearer {}", secret.trim()));
+            req = req.header("Authorization", format!("Bearer {}", secret));
         }
 
         let resp = req.send().await.map_err(|e| format!("HTTP error: {}", e))?;
