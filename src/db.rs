@@ -35,7 +35,9 @@ pub struct LogEntry {
 impl Database {
     pub async fn new(db_url: &str) -> Result<Self> {
         let mut opts = SqliteConnectOptions::from_str(db_url)?
-            .create_if_missing(true);
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .busy_timeout(std::time::Duration::from_secs(5));
         
         if db_url.contains(":memory:") {
             opts = opts.shared_cache(true);
@@ -44,7 +46,8 @@ impl Database {
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .after_connect(|conn, _meta| Box::pin(async move {
-                sqlx::query("PRAGMA foreign_keys = OFF").execute(conn).await?;
+                sqlx::query("PRAGMA foreign_keys = OFF").execute(&mut *conn).await?;
+                sqlx::query("PRAGMA busy_timeout = 5000").execute(&mut *conn).await?;
                 Ok(())
             }))
             .connect_with(opts)
@@ -281,11 +284,31 @@ impl Database {
     }
 
     pub async fn upsert_provider_models_batch(&self, _provider_name: &str, _pool_name: &str, models: &[ProviderModel]) -> Result<usize> {
+        let mut tx = self.pool.begin().await?;
         let mut count = 0;
         for model in models {
-            self.upsert_provider_model(model).await?;
+            sqlx::query(
+                "INSERT INTO provider_models (provider_name, pool_name, model_id, owned_by, context_window, capabilities, is_stale)
+                 VALUES (?, ?, ?, ?, ?, ?, 0)
+                 ON CONFLICT(provider_name, model_id) DO UPDATE SET
+                    pool_name = excluded.pool_name,
+                    owned_by = excluded.owned_by,
+                    context_window = excluded.context_window,
+                    capabilities = excluded.capabilities,
+                    is_stale = 0,
+                    fetched_at = CURRENT_TIMESTAMP"
+            )
+            .bind(&model.provider_name)
+            .bind(&model.pool_name)
+            .bind(&model.model_id)
+            .bind(&model.owned_by)
+            .bind(model.context_window)
+            .bind(&model.capabilities)
+            .execute(&mut *tx)
+            .await?;
             count += 1;
         }
+        tx.commit().await?;
         Ok(count)
     }
 }
