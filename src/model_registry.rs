@@ -92,10 +92,14 @@ impl ModelRegistry {
     async fn fetch_models(&self, pool_cfg: &crate::config::PoolConfig) -> Result<Vec<RawModel>, String> {
         let base_url = pool_cfg.target_url.trim_end_matches('/');
         let is_google = pool_cfg.provider == "gemini" || pool_cfg.provider == "google";
+        let is_gemini_openai = is_google && base_url.contains("/openai/");
 
         // Build the models endpoint URL
         let url = if let Some(ref ep) = pool_cfg.models_endpoint {
             format!("{}{}", base_url, ep)
+        } else if is_gemini_openai {
+            // Google OpenAI-compatible endpoint uses standard OpenAI format
+            format!("{}/models", base_url)
         } else if is_google {
             // Gemini requires /v1beta/models (not just /models)
             format!("{}/v1beta/models", base_url)
@@ -122,7 +126,9 @@ impl ModelRegistry {
 
         let mut req = self.http_client.get(&url);
 
-        if is_google {
+        if is_gemini_openai {
+            req = req.header("Authorization", format!("Bearer {}", secret));
+        } else if is_google {
             // Gemini uses query param ?key= as primary auth
             let url_with_key = format!("{}?key={}", url, secret);
             req = self.http_client.get(&url_with_key);
@@ -226,6 +232,10 @@ struct RawModel {
 
 fn parse_models_response(provider: &str, body: &Value) -> Vec<RawModel> {
     match provider {
+        "gemini" | "google" if body.get("data").and_then(|d| d.as_array()).is_some() => {
+            // Google OpenAI-compatible endpoint returns OpenAI format ({"data": [...]})
+            parse_openai_compatible_models(body)
+        }
         "gemini" | "google" => parse_google_models(body),
         _ => parse_openai_compatible_models(body),
     }
