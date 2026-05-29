@@ -23,7 +23,7 @@ graph TD
 
     subgraph "Dynamic Model Discovery"
         Registry -- in-memory cache --> Cache[model → pool mapping]
-        Registry -- периодическая синхронизация (6ч) --> ProviderAPI[/models эндпоинты провайдеров]
+        Registry -- периодическая синхронизация (6ч) --> ProviderAPI["/models эндпоинты провайдеров"]
         ProviderAPI -- OpenAI-compat / Gemini формат --> Registry
         Registry -- upsert моделей --> DB
     end
