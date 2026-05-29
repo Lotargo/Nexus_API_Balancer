@@ -1,6 +1,6 @@
 use axum::{
     extract::{State, FromRequestParts, Path},
-    http::{request::Parts, StatusCode, header::AUTHORIZATION, Method, HeaderMap, Response, Uri},
+    http::{request::Parts, StatusCode, header::AUTHORIZATION, Method, HeaderMap, HeaderName, Response, Uri},
     routing::{get, post, any},
     response::IntoResponse,
     body::{to_bytes, Body, Bytes},
@@ -37,6 +37,14 @@ fn is_hop_by_hop_header(name: &axum::http::HeaderName) -> bool {
             | "upgrade"
             | "content-length"
     )
+}
+
+fn should_forward_request_header(name: &HeaderName) -> bool {
+    !is_hop_by_hop_header(name)
+        && !matches!(
+            name.as_str(),
+            "authorization" | "host" | "x-goog-api-key" | "x-api-key" | "api-key"
+        )
 }
 
 fn build_target_url(target_base: &str, path: &str, query: Option<&str>) -> String {
@@ -126,9 +134,17 @@ fn extract_response_tokens(bytes: &[u8], input_tokens: u32) -> u32 {
     }
 }
 
+fn is_streaming_request(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|json| json.get("stream").and_then(|stream| stream.as_bool()))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_target_url, extract_response_tokens, parse_explicit_model};
+    use super::{build_target_url, extract_response_tokens, is_streaming_request, parse_explicit_model, should_forward_request_header};
+    use axum::http::HeaderName;
 
     #[test]
     fn parses_explicit_provider_model() {
@@ -199,6 +215,24 @@ data: [DONE]
 "#;
 
         assert_eq!(extract_response_tokens(payload, 10), 42);
+    }
+
+    #[test]
+    fn detects_streaming_openai_requests() {
+        assert!(is_streaming_request(br#"{"model":"x","stream":true}"#));
+        assert!(!is_streaming_request(br#"{"model":"x","stream":false}"#));
+        assert!(!is_streaming_request(br#"not-json"#));
+    }
+
+    #[test]
+    fn drops_request_hop_by_hop_and_auth_headers() {
+        for name in ["content-length", "connection", "authorization", "host", "x-api-key", "api-key", "x-goog-api-key"] {
+            let header = HeaderName::from_bytes(name.as_bytes()).unwrap();
+            assert!(!should_forward_request_header(&header));
+        }
+
+        let content_type = HeaderName::from_static("content-type");
+        assert!(should_forward_request_header(&content_type));
     }
 }
 
@@ -1177,8 +1211,7 @@ async fn handle_proxy_internal(
     // Collect headers to forward (once, before retry loop)
     let forward_headers: Vec<(String, String)> = headers.iter()
         .filter_map(|(name, value)| {
-            let name_lower = name.as_str().to_lowercase();
-            if name_lower != "authorization" && name_lower != "host" && name_lower != "x-goog-api-key" && name_lower != "x-api-key" && name_lower != "api-key" {
+            if should_forward_request_header(name) {
                 Some((name.as_str().to_string(), value.to_str().unwrap_or("").to_string()))
             } else {
                 None
@@ -1186,8 +1219,13 @@ async fn handle_proxy_internal(
         })
         .collect();
 
-    // Retry loop for upstream request (transport errors only)
-    let max_retries = 2;
+    let max_retries = if !is_streaming_request(&body_bytes)
+        && (method == Method::GET || method == Method::HEAD)
+    {
+        2
+    } else {
+        0
+    };
     let mut last_error = String::new();
     let mut res: Option<reqwest::Response> = None;
 
@@ -1262,58 +1300,66 @@ async fn handle_proxy_internal(
                 let pool_name_for_log = pool_name.clone();
                 let key_id_for_log = key_id.clone();
                 let key_for_stream = key.clone();
-                let status_for_log = if status.is_success() { "success".to_string() } else { status.as_str().to_string() };
+                let status_for_log = if status.is_success() {
+                    "success".to_string()
+                } else {
+                    status.as_str().to_string()
+                };
 
-                let stream = futures::stream::unfold(
-                    (
-                        resp.bytes_stream(),
-                        Vec::<u8>::new(),
-                        Some((db, pool, key_for_stream, client_id, key_id_for_log, pool_name_for_log, status_for_log)),
-                    ),
-                    move |(mut upstream, mut collected, resources)| async move {
-                        match upstream.next().await {
-                            Some(Ok(chunk)) => {
-                                collected.extend_from_slice(&chunk);
-                                Some((Ok::<_, std::io::Error>(chunk), (upstream, collected, resources)))
+                let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
+                tokio::spawn(async move {
+                    let mut upstream = resp.bytes_stream();
+                    let mut collected = Vec::<u8>::new();
+                    let mut final_status = status_for_log;
+                    let mut error_message = None;
+
+                    loop {
+                        tokio::select! {
+                            _ = tx.closed() => {
+                                final_status = "client_disconnected".to_string();
+                                break;
                             }
-                            Some(Err(err)) => {
-                                if let Some((db, pool, key, client_id, key_id, pool_name, _status_for_log)) = resources {
-                                    let total_tokens = extract_response_tokens(&collected, input_tokens);
-                                    key.record_usage(total_tokens);
-                                    pool.release(key).await;
-                                    let _ = db.log_request(crate::db::LogEntry {
-                                        client_id: Some(client_id),
-                                        key_id: Some(key_id),
-                                        pool_id: Some(pool_name),
-                                        status: "stream_error".to_string(),
-                                        tokens_used: total_tokens,
-                                        error_message: Some(err.to_string()),
-                                        ..Default::default()
-                                    }).await;
-                                }
-                                Some((Err(std::io::Error::other(err.to_string())), (upstream, collected, None)))
-                            }
-                            None => {
-                                if let Some((db, pool, key, client_id, key_id, pool_name, status_for_log)) = resources {
-                                    let total_tokens = extract_response_tokens(&collected, input_tokens);
-                                    key.record_usage(total_tokens);
-                                    pool.release(key).await;
-                                    if let Err(e) = db.log_request(crate::db::LogEntry {
-                                        client_id: Some(client_id),
-                                        key_id: Some(key_id),
-                                        pool_id: Some(pool_name),
-                                        status: status_for_log,
-                                        tokens_used: total_tokens,
-                                        ..Default::default()
-                                    }).await {
-                                        eprintln!("Failed to log streaming request to DB: {}", e);
+                            next = upstream.next() => {
+                                match next {
+                                    Some(Ok(chunk)) => {
+                                        collected.extend_from_slice(&chunk);
+                                        if tx.send(Ok(chunk)).await.is_err() {
+                                            final_status = "client_disconnected".to_string();
+                                            break;
+                                        }
                                     }
+                                    Some(Err(err)) => {
+                                        let message = err.to_string();
+                                        final_status = "stream_error".to_string();
+                                        error_message = Some(message.clone());
+                                        let _ = tx.send(Err(std::io::Error::other(message))).await;
+                                        break;
+                                    }
+                                    None => break,
                                 }
-                                None
                             }
                         }
-                    },
-                );
+                    }
+
+                    let total_tokens = extract_response_tokens(&collected, input_tokens);
+                    key_for_stream.record_usage(total_tokens);
+                    pool.release(key_for_stream).await;
+                    if let Err(e) = db.log_request(crate::db::LogEntry {
+                        client_id: Some(client_id),
+                        key_id: Some(key_id_for_log),
+                        pool_id: Some(pool_name_for_log),
+                        status: final_status,
+                        tokens_used: total_tokens,
+                        error_message,
+                        ..Default::default()
+                    }).await {
+                        eprintln!("Failed to log streaming request to DB: {}", e);
+                    }
+                });
+
+                let stream = futures::stream::unfold(rx, |mut rx| async move {
+                    rx.recv().await.map(|chunk| (chunk, rx))
+                });
 
                 res_builder.body(Body::from_stream(stream)).unwrap().into_response()
             } else {
