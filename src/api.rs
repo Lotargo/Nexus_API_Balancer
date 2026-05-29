@@ -20,7 +20,8 @@ use crate::config::{AppConfig};
 use crate::mcp::{BalancerMcpServer, McpRequest, McpResponse};
 use crate::db::{Database, LogEntry};
 use utoipa::{OpenApi, ToSchema};
-use tokio::time::Instant;
+use tokio::time::{timeout, Instant};
+use std::time::Duration;
 use chrono::Local;
 
 fn is_hop_by_hop_header(name: &axum::http::HeaderName) -> bool {
@@ -386,7 +387,10 @@ pub fn create_router(
     storage: crate::storage::SecretStorage,
     model_registry: Arc<crate::model_registry::ModelRegistry>,
 ) -> Router {
-    let http_client = reqwest::Client::new();
+    let http_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
     
     // Note: MCP currently still uses 'primary' pool or first pool for simplicity
     let mcp = BalancerMcpServer::new(
@@ -1170,33 +1174,68 @@ async fn handle_proxy_internal(
         }
     }
 
-    // Forward the request
-    let mut req_builder = state.http_client.request(method, &final_url);
+    // Collect headers to forward (once, before retry loop)
+    let forward_headers: Vec<(String, String)> = headers.iter()
+        .filter_map(|(name, value)| {
+            let name_lower = name.as_str().to_lowercase();
+            if name_lower != "authorization" && name_lower != "host" && name_lower != "x-goog-api-key" && name_lower != "x-api-key" && name_lower != "api-key" {
+                Some((name.as_str().to_string(), value.to_str().unwrap_or("").to_string()))
+            } else {
+                None
+            }
+        })
+        .collect();
 
-    // Forward headers (except authorization, host, and provider-specific keys)
-    for (name, value) in headers.iter() {
-        let name_lower = name.as_str().to_lowercase();
-        if name_lower != "authorization" && name_lower != "host" && name_lower != "x-goog-api-key" && name_lower != "x-api-key" && name_lower != "api-key" {
-            req_builder = req_builder.header(name, value);
+    // Retry loop for upstream request (transport errors only)
+    let max_retries = 2;
+    let mut last_error = String::new();
+    let mut res: Option<reqwest::Response> = None;
+
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            let delay = Duration::from_millis(500 * 2u64.pow(attempt as u32 - 1));
+            tokio::time::sleep(delay).await;
+            println!(" [{}] [DEBUG] Proxy: Retry attempt {}/{} for pool '{}'", Local::now().format("%H:%M:%S%.3f"), attempt, max_retries, pool_name);
+        }
+
+        let mut req_builder = state.http_client.request(method.clone(), &final_url);
+
+        for (name, value) in &forward_headers {
+            req_builder = req_builder.header(name.as_str(), value.as_str());
+        }
+
+        if is_google {
+            req_builder = req_builder.header("x-goog-api-key", &secret);
+        } else if provider == "anthropic" || provider == "claude" || final_url.contains("anthropic.com") {
+            req_builder = req_builder.header("x-api-key", &secret);
+            req_builder = req_builder.header("anthropic-version", "2023-06-01");
+        } else {
+            req_builder = req_builder.header(AUTHORIZATION, format!("Bearer {}", secret));
+        }
+
+        let result = timeout(
+            Duration::from_secs(60),
+            req_builder.body(body_bytes.clone()).send(),
+        ).await;
+
+        match result {
+            Ok(Ok(resp)) => {
+                res = Some(resp);
+                break;
+            }
+            Ok(Err(e)) => {
+                last_error = format!("error sending request: {}", e);
+                eprintln!(" [{}] [WARN] Proxy: Upstream request failed (attempt {}/{}): {}", Local::now().format("%H:%M:%S%.3f"), attempt + 1, max_retries + 1, last_error);
+            }
+            Err(_) => {
+                last_error = "request timeout after 60s".to_string();
+                eprintln!(" [{}] [WARN] Proxy: Upstream request timeout (attempt {}/{})", Local::now().format("%H:%M:%S%.3f"), attempt + 1, max_retries + 1);
+            }
         }
     }
 
-    if is_google {
-        req_builder = req_builder.header("x-goog-api-key", &secret);
-    } else if provider == "anthropic" || provider == "claude" || final_url.contains("anthropic.com") {
-        req_builder = req_builder.header("x-api-key", &secret);
-        req_builder = req_builder.header("anthropic-version", "2023-06-01");
-    } else {
-        // Default to OpenAI-compatible Bearer token
-        req_builder = req_builder.header(AUTHORIZATION, format!("Bearer {}", secret));
-    }
-
-    let res = req_builder.body(body_bytes).send().await;
-
-
-
     match res {
-        Ok(resp) => {
+        Some(resp) => {
             let status = resp.status();
             let mut res_builder = Response::builder().status(status);
             let is_sse = resp
@@ -1278,7 +1317,21 @@ async fn handle_proxy_internal(
 
                 res_builder.body(Body::from_stream(stream)).unwrap().into_response()
             } else {
-                let bytes = resp.bytes().await.unwrap_or_default();
+                let bytes = match timeout(Duration::from_secs(120), resp.bytes()).await {
+                    Ok(Ok(b)) => b,
+                    Ok(Err(e)) => {
+                        eprintln!(" [{}] [ERROR] Proxy: Failed to read response body: {}", Local::now().format("%H:%M:%S%.3f"), e);
+                        key.record_usage(0);
+                        state.pools.get(&pool_name).unwrap().release(key).await;
+                        return (StatusCode::BAD_GATEWAY, format!("Failed to read upstream response body: {}", e)).into_response();
+                    }
+                    Err(_) => {
+                        eprintln!(" [{}] [ERROR] Proxy: Timeout reading response body", Local::now().format("%H:%M:%S%.3f"));
+                        key.record_usage(0);
+                        state.pools.get(&pool_name).unwrap().release(key).await;
+                        return (StatusCode::BAD_GATEWAY, "Timeout reading upstream response body".to_string()).into_response();
+                    }
+                };
                 let total_tokens = extract_response_tokens(&bytes, input_tokens);
                 key.record_usage(total_tokens);
 
@@ -1298,9 +1351,9 @@ async fn handle_proxy_internal(
                 res_builder.body(Body::from(bytes)).unwrap().into_response()
             }
         }
-        Err(e) => {
+        None => {
             state.pools.get(&pool_name).unwrap().release(key).await;
-            (StatusCode::BAD_GATEWAY, format!("Upstream error: {}", e)).into_response()
+            (StatusCode::BAD_GATEWAY, format!("502 Upstream error after {} retries: {}", max_retries, last_error)).into_response()
         }
     }
 }
