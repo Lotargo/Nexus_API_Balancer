@@ -155,6 +155,11 @@ mod tests {
         let (provider, model) = parse_explicit_model("//model");
         assert_eq!(provider, None);
         assert_eq!(model, "//model");
+
+        // Nested slashes in model_id (e.g. openai/gpt-oss-120b)
+        let (provider, model) = parse_explicit_model("//groq//openai/gpt-oss-120b");
+        assert_eq!(provider, Some("groq".to_string()));
+        assert_eq!(model, "openai/gpt-oss-120b");
     }
 
     #[test]
@@ -248,6 +253,7 @@ pub struct AppState {
     pub db: Database,
     pub storage: crate::storage::SecretStorage,
     pub http_client: reqwest::Client,
+    pub model_registry: Arc<crate::model_registry::ModelRegistry>,
 }
 
 /// OAuth 2.1 Bearer Token extractor
@@ -378,6 +384,7 @@ pub fn create_router(
     config: Arc<ArcSwap<AppConfig>>, 
     db: Database,
     storage: crate::storage::SecretStorage,
+    model_registry: Arc<crate::model_registry::ModelRegistry>,
 ) -> Router {
     let http_client = reqwest::Client::new();
     
@@ -398,6 +405,7 @@ pub fn create_router(
         db,
         storage,
         http_client,
+        model_registry,
     });
 
     
@@ -414,6 +422,7 @@ pub fn create_router(
         // Unified Gateway (Auto-routing by model)
         .route("/v1/*path", any(handle_unified_proxy))
         .route("/v1beta/*path", any(handle_unified_proxy))
+        .route("/v1/models", get(handle_list_models))
         .route("/mcp", post(handle_mcp))
 
         .with_state(state)
@@ -867,6 +876,39 @@ error: if is_none { Some(serde_json::Value::String("Method not found".to_string(
     })
 }
 
+async fn handle_list_models(
+    State(state): State<Arc<AppState>>,
+    token: AuthToken,
+) -> Json<serde_json::Value> {
+    let allowed_pools = if token.0.role.as_deref() == Some("admin") {
+        None
+    } else {
+        Some(state.db.get_allowed_pools(&token.0.sub).await.unwrap_or_default())
+    };
+
+    let models = state.db.get_all_models().await.unwrap_or_default();
+
+    let data: Vec<serde_json::Value> = models.into_iter()
+        .filter(|m| {
+            allowed_pools.as_ref().map_or(true, |ap| ap.contains(&m.pool_name))
+        })
+        .map(|m| {
+            let mut entry = serde_json::json!({
+                "id": m.model_id,
+                "object": "model",
+                "owned_by": m.owned_by,
+                "pool_name": m.pool_name,
+            });
+            if let Some(cw) = m.context_window {
+                entry["context_window"] = serde_json::json!(cw);
+            }
+            entry
+        })
+        .collect();
+
+    Json(serde_json::json!({"object": "list", "data": data}))
+}
+
 /// Parse model name for explicit provider routing: `//provider//real_model_name`
 /// Returns (explicit_provider, real_model_name).
 /// If no `//provider//` prefix, returns (None, original_model).
@@ -952,22 +994,25 @@ async fn handle_unified_proxy(
         // Explicit provider from //provider//model
         find_pool(&[provider.as_str()])
     } else if let Some(ref model) = model_name {
-        let model_low = model.to_lowercase();
-        if model_low.starts_with("gpt-") || model_low.starts_with("o1-") || model_low.starts_with("text-davinci") {
-            find_pool(&["openai"])
-        } else if model_low.starts_with("claude-") {
-            find_pool(&["anthropic", "claude"])
-        } else if model_low.starts_with("gemini-") {
-            find_pool(&["google", "gemini"])
-        } else if model_low.starts_with("deepseek-") {
-            find_pool(&["deepseek"])
-        } else if model_low.starts_with("mistral-") || model_low.starts_with("codestral-") || model_low.starts_with("pixtral-") || model_low.starts_with("ministral-") || model_low.starts_with("open-mixtral-") {
-            find_pool(&["mistral"])
-        } else if model_low.starts_with("llama") || model_low.starts_with("gemma") {
-            find_pool(&["groq", "cerebras"])
-        } else {
-            None
-        }
+        // Data-driven routing via ModelRegistry
+        state.model_registry.resolve_model_filtered(model, allowed_pools.as_ref())
+            .or_else(|| {
+                // Fallback: try to find by provider name heuristics if model not in registry
+                let model_low = model.to_lowercase();
+                if model_low.starts_with("gpt-") || model_low.starts_with("o1-") || model_low.starts_with("text-davinci") {
+                    find_pool(&["openai"])
+                } else if model_low.starts_with("claude-") {
+                    find_pool(&["anthropic", "claude"])
+                } else if model_low.starts_with("gemini-") {
+                    find_pool(&["google", "gemini"])
+                } else if model_low.starts_with("deepseek-") {
+                    find_pool(&["deepseek"])
+                } else if model_low.starts_with("mistral-") || model_low.starts_with("codestral-") || model_low.starts_with("pixtral-") || model_low.starts_with("ministral-") || model_low.starts_with("open-mixtral-") {
+                    find_pool(&["mistral"])
+                } else {
+                    None
+                }
+            })
     } else {
         None
     };

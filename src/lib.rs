@@ -7,6 +7,7 @@ pub mod mcp;
 pub mod db;
 pub mod utils;
 pub mod mcp_client;
+pub mod model_registry;
 
 use anyhow::Result;
 use crate::config::AppConfig;
@@ -14,6 +15,7 @@ use crate::storage::SecretStorage;
 use crate::core::{ApiKey, KeyPool};
 use crate::auth::AuthManager;
 use crate::db::Database;
+use crate::model_registry::ModelRegistry;
 use std::collections::HashMap;
 use std::sync::Arc;
 use arc_swap::ArcSwap;
@@ -24,6 +26,7 @@ use crate::api::ApiDoc;
 pub async fn run_server(config: AppConfig, db: Database, storage_path: &str) -> Result<()> {
     let shared_config = Arc::new(ArcSwap::from(Arc::new(config.clone())));
     let storage = SecretStorage::new(storage_path);
+    let http_client = reqwest::Client::new();
     let mut pools = HashMap::new();
 
     for pool_cfg in &config.pools {
@@ -77,8 +80,39 @@ pub async fn run_server(config: AppConfig, db: Database, storage_path: &str) -> 
         pools.insert(pool_cfg.name.clone(), pool);
     }
 
+    // Initialize Model Registry
+    let model_registry = Arc::new(ModelRegistry::new(
+        db.clone(),
+        shared_config.clone(),
+        http_client.clone(),
+        storage.clone(),
+    ));
+
+    // Initial sync (non-blocking failures per provider)
+    println!("[ModelRegistry] Starting initial model discovery...");
+    if let Err(errors) = model_registry.sync_all_providers().await {
+        for e in &errors {
+            eprintln!("[ModelRegistry] Warning: Initial sync had errors: {}", e);
+        }
+    }
+
+    // Count discovered models for startup banner
+    let model_count = db.get_all_models().await.map(|m| m.len()).unwrap_or(0);
+    let provider_count = {
+        let mut providers: Vec<String> = config.pools.iter()
+            .filter(|p| !p.skip_model_sync)
+            .map(|p| p.provider.clone())
+            .collect();
+        providers.sort();
+        providers.dedup();
+        providers.len()
+    };
+
+    // Spawn periodic rebase every 6 hours
+    model_registry.spawn_periodic_sync();
+
     let auth_manager = AuthManager::new(config.auth.clone());
-    let app = api::create_router(pools, auth_manager, shared_config, db, storage)
+    let app = api::create_router(pools, auth_manager, shared_config, db, storage, model_registry)
         .merge(Scalar::with_url("/scalar", ApiDoc::openapi()))
         .layer(
             tower_http::cors::CorsLayer::permissive()
@@ -86,6 +120,12 @@ pub async fn run_server(config: AppConfig, db: Database, storage_path: &str) -> 
     
     let addr_str = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr_str).await?;
+
+    // Update the banner to show model count
+    let green = "\x1b[32m";
+    let reset = "\x1b[0m";
+    println!("   {}Models:  {} discovered across {} providers{}", green, model_count, provider_count, reset);
+
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
             tokio::signal::ctrl_c()

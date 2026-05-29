@@ -20,6 +20,11 @@ pools:
     # Base URL for Gemini. Versioning (v1/v1beta) is managed by the balancer.
     target_url: "https://generativelanguage.googleapis.com"
     capacity: 20
+    priority: 10
+    # Custom endpoint for model discovery (defaults to /models)
+    # models_endpoint: "/models"
+    # Set to true to skip auto-discovery for this pool
+    # skip_model_sync: false
     keys:
       - id: "GEMINI_KEY"
         # Support for multi-key files: Nexus will automatically split keys 
@@ -36,6 +41,7 @@ pools:
     provider: "openai"
     target_url: "https://api.openai.com"
     capacity: 20
+    priority: 5
     keys:
       - id: "OPENAI_KEY_1"
         secret_name: "openai_key_1"
