@@ -796,122 +796,257 @@ async fn handle_patch_config(
     Json(sanitized)
 }
 
+/// Internal helper to generate JSON-RPC error
+fn mcp_error(id: serde_json::Value, code: i32, message: &str) -> Json<McpResponse> {
+    Json(McpResponse {
+        jsonrpc: "2.0".to_string(),
+        id,
+        result: None,
+        error: Some(serde_json::json!({
+            "code": code,
+            "message": message
+        })),
+    })
+}
+
 /// Simple MCP JSON-RPC handler
 async fn handle_mcp(
     State(state): State<Arc<AppState>>,
     token: AuthToken,
     Json(request): Json<McpRequest>,
 ) -> Json<McpResponse> {
-    let result = match request.method.as_str() {
-        "list_pools" => {
-            let allowed_pools = if token.0.role.as_deref() == Some("admin") {
-                None // Admin sees all
-            } else {
-                Some(state.db.get_allowed_pools(&token.0.sub).await.unwrap_or_default())
-            };
+    let method = request.method.as_str();
 
-            let mut pools = state.mcp.list_pools().await;
-            if let Some(allowed) = allowed_pools {
-                pools.retain(|p| {
-                    if let Some(name) = p["name"].as_str() {
-                        allowed.contains(&name.to_string())
-                    } else {
-                        false
-                    }
-                });
-            }
-            Some(serde_json::to_value(pools).unwrap())
-        },
-        "get_config" => Some(state.mcp.get_config_resource().await),
-        "update_description" => {
-            if token.0.role.as_deref() != Some("admin") && token.0.sub != "admin-bypass" {
-                return Json(McpResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: request.id,
-                    result: None,
-                    error: Some(serde_json::Value::String("Admin privileges required for this MCP method".to_string())),
-                });
-            }
-            let args: crate::mcp::UpdateDescriptionArgs = serde_json::from_value(request.params.unwrap_or_default()).unwrap();
-            match state.mcp.update_pool_description(args).await {
-                Ok(msg) => Some(serde_json::Value::String(msg)),
-                Err(e) => return Json(McpResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: request.id,
-                    result: None,
-                    error: Some(serde_json::Value::String(e)),
-                }),
-            }
-        },
-        "export_key" => {
-            if token.0.role.as_deref() != Some("admin") {
-                return Json(McpResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: request.id,
-                    result: None,
-                    error: Some(serde_json::Value::String("Admin privileges required for export_key".to_string())),
-                });
-            }
-            let params = request.params.unwrap_or_default();
-            let pool_name = params["pool_name"].as_str().unwrap_or_default();
-            let key_id = params["key_id"].as_str().unwrap_or_default();
-            match state.mcp.export_key(pool_name, key_id).await {
-                Ok(v) => Some(v),
-                Err(e) => return Json(McpResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: request.id,
-                    result: None,
-                    error: Some(serde_json::Value::String(e)),
-                }),
-            }
-        },
-        "import_key" => {
-            if token.0.role.as_deref() != Some("admin") {
-                return Json(McpResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: request.id,
-                    result: None,
-                    error: Some(serde_json::Value::String("Admin privileges required for import_key".to_string())),
-                });
-            }
-            let params = request.params.unwrap_or_default();
-            let pool_name = params["pool_name"].as_str().unwrap_or_default();
-            let key_cfg_res: Result<crate::config::KeyConfig, _> = serde_json::from_value(params["key_cfg"].clone());
-            let secret = params["secret"].as_str().unwrap_or_default().to_string();
-            let provider = params["provider"].as_str().map(|s| s.to_string());
-            let kv_cache = params.get("kv_cache").and_then(|v| v.as_bool());
-            
-            match key_cfg_res {
-                Ok(key_cfg) => {
-                    match state.mcp.import_key(&token.0.sub, pool_name, key_cfg, secret, provider, kv_cache).await {
-
-                        Ok(msg) => Some(serde_json::Value::String(msg)),
-                        Err(e) => return Json(McpResponse {
-                            jsonrpc: "2.0".to_string(),
-                            id: request.id,
-                            result: None,
-                            error: Some(serde_json::Value::String(e)),
-                        }),
-                    }
+    // 1. Initialization
+    if method == "initialize" {
+        return Json(McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: request.id,
+            result: Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {},
+                    "resources": {}
                 },
-                Err(e) => return Json(McpResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: request.id,
-                    result: None,
-                    error: Some(serde_json::Value::String(format!("Invalid key_cfg: {}", e))),
-                }),
-            }
-        },
-        _ => None,
-    };
+                "serverInfo": {
+                    "name": "nexus-balancer",
+                    "version": "0.1.0"
+                }
+            })),
+            error: None,
+        });
+    }
 
-    let is_none = result.is_none();
-    Json(McpResponse {
-        jsonrpc: "2.0".to_string(),
-        id: request.id,
-        result,
-error: if is_none { Some(serde_json::Value::String("Method not found".to_string())) } else { None },
-    })
+    if method == "notifications/initialized" {
+        return Json(McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: request.id,
+            result: Some(serde_json::json!({})),
+            error: None,
+        });
+    }
+
+    // 2. Discover Tools
+    if method == "tools/list" {
+        return Json(McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: request.id,
+            result: Some(serde_json::json!({
+                "tools": [
+                    {
+                        "name": "list_pools",
+                        "description": "List all available API key pools and their status",
+                        "inputSchema": { "type": "object", "properties": {} }
+                    },
+                    {
+                        "name": "update_description",
+                        "description": "Update the description of a specific pool",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "pool_name": { "type": "string" },
+                                "description": { "type": "string" }
+                            },
+                            "required": ["pool_name", "description"]
+                        }
+                    },
+                    {
+                        "name": "export_key",
+                        "description": "Export a specific key configuration and secret",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "pool_name": { "type": "string" },
+                                "key_id": { "type": "string" }
+                            },
+                            "required": ["pool_name", "key_id"]
+                        }
+                    },
+                    {
+                        "name": "import_key",
+                        "description": "Import a new key to a pool",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "pool_name": { "type": "string" },
+                                "key_cfg": { "type": "object" },
+                                "secret": { "type": "string" },
+                                "provider": { "type": "string" },
+                                "kv_cache": { "type": "boolean" }
+                            },
+                            "required": ["pool_name", "key_cfg", "secret"]
+                        }
+                    }
+                ]
+            })),
+            error: None,
+        });
+    }
+
+    // 3. Discover Resources
+    if method == "resources/list" {
+        return Json(McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: request.id,
+            result: Some(serde_json::json!({
+                "resources": [
+                    {
+                        "uri": "config://main",
+                        "name": "Server Configuration",
+                        "mimeType": "application/json",
+                        "description": "The current sanitized server configuration"
+                    }
+                ]
+            })),
+            error: None,
+        });
+    }
+
+    if method == "resources/read" {
+        let params = request.params.unwrap_or_default();
+        let uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
+
+        if uri == "config://main" {
+            let config_json = serde_json::to_string(&state.mcp.get_config_resource().await).unwrap_or_default();
+            return Json(McpResponse {
+                jsonrpc: "2.0".to_string(),
+                id: request.id,
+                result: Some(serde_json::json!({
+                    "contents": [
+                        {
+                            "uri": "config://main",
+                            "mimeType": "application/json",
+                            "text": config_json
+                        }
+                    ]
+                })),
+                error: None,
+            });
+        }
+        return mcp_error(request.id, -32602, "Resource not found");
+    }
+
+    // 4. Call Tools
+    if method == "tools/call" {
+        let params = request.params.unwrap_or_default();
+        let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let tool_args = params.get("arguments").cloned().unwrap_or_default();
+
+        let content_result = match tool_name {
+            "list_pools" => {
+                let allowed_pools = if token.0.role.as_deref() == Some("admin") {
+                    None
+                } else {
+                    Some(state.db.get_allowed_pools(&token.0.sub).await.unwrap_or_default())
+                };
+
+                let mut pools = state.mcp.list_pools().await;
+                if let Some(allowed) = allowed_pools {
+                    pools.retain(|p| {
+                        if let Some(name) = p["name"].as_str() {
+                            allowed.contains(&name.to_string())
+                        } else {
+                            false
+                        }
+                    });
+                }
+                Ok(serde_json::to_string_pretty(&pools).unwrap_or_default())
+            },
+            "update_description" => {
+                if token.0.role.as_deref() != Some("admin") && token.0.sub != "admin-bypass" {
+                    Err("Admin privileges required for this MCP method".to_string())
+                } else {
+                    match serde_json::from_value::<crate::mcp::UpdateDescriptionArgs>(tool_args) {
+                        Ok(args) => {
+                            match state.mcp.update_pool_description(args).await {
+                                Ok(msg) => Ok(msg),
+                                Err(e) => Err(e),
+                            }
+                        },
+                        Err(_) => Err("Invalid arguments".to_string())
+                    }
+                }
+            },
+            "export_key" => {
+                if token.0.role.as_deref() != Some("admin") {
+                    Err("Admin privileges required".to_string())
+                } else {
+                    let pool_name = tool_args.get("pool_name").and_then(|v| v.as_str()).unwrap_or("");
+                    let key_id = tool_args.get("key_id").and_then(|v| v.as_str()).unwrap_or("");
+                    match state.mcp.export_key(pool_name, key_id).await {
+                        Ok(data) => Ok(serde_json::to_string_pretty(&data).unwrap_or_default()),
+                        Err(e) => Err(e),
+                    }
+                }
+            },
+            "import_key" => {
+                let pool_name = tool_args.get("pool_name").and_then(|v| v.as_str()).unwrap_or("");
+                let is_admin = token.0.role.as_deref() == Some("admin");
+                let allowed = if is_admin { true } else {
+                    state.db.get_allowed_pools(&token.0.sub).await.unwrap_or_default().contains(&pool_name.to_string())
+                };
+
+                if !allowed {
+                    Err("Not authorized for this pool".to_string())
+                } else if let Ok(key_cfg) = serde_json::from_value::<crate::config::KeyConfig>(tool_args.get("key_cfg").cloned().unwrap_or_default()) {
+                    let secret = tool_args.get("secret").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let provider = tool_args.get("provider").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let kv_cache = tool_args.get("kv_cache").and_then(|v| v.as_bool());
+
+                    if !secret.is_empty() {
+                        match state.mcp.import_key(&token.0.sub, pool_name, key_cfg, secret, provider, kv_cache).await {
+                            Ok(msg) => Ok(msg),
+                            Err(e) => Err(e),
+                        }
+                    } else {
+                        Err("Secret is required".to_string())
+                    }
+                } else {
+                    Err("Invalid key_cfg argument".to_string())
+                }
+            },
+            _ => Err(format!("Tool '{}' not found", tool_name))
+        };
+
+        match content_result {
+            Ok(text) => return Json(McpResponse {
+                jsonrpc: "2.0".to_string(),
+                id: request.id,
+                result: Some(serde_json::json!({
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": text
+                        }
+                    ]
+                })),
+                error: None,
+            }),
+            Err(e) => return mcp_error(request.id, -32603, &format!("Tool error: {}", e)),
+        }
+    }
+
+    mcp_error(request.id, -32601, "Method not found")
 }
 
 async fn handle_list_models(
