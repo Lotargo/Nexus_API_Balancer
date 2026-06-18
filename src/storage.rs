@@ -1,6 +1,15 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
+
+fn is_safe_name(name: &str) -> bool {
+    let path = Path::new(name);
+    // Reject absolute paths, parent dir components, and empty segments
+    !path.has_root()
+        && path.components().all(|c| {
+            matches!(c, std::path::Component::Normal(_))
+        })
+}
 
 #[derive(Clone)]
 pub struct SecretStorage {
@@ -16,6 +25,9 @@ impl SecretStorage {
 
     /// Loads a secret by name. Handles subdirectories if present in name.
     pub fn load_secret(&self, name: &str) -> Result<String> {
+        if !is_safe_name(name) {
+            return Err(anyhow::anyhow!("Path traversal detected in name: {:?}", name));
+        }
         let path = self.base_path.join(name);
         let secret = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read secret file: {:?}", path))?;
@@ -23,6 +35,9 @@ impl SecretStorage {
     }
 
     pub fn save_secret(&self, name: &str, secret: &str) -> Result<()> {
+        if !is_safe_name(name) {
+            return Err(anyhow::anyhow!("Path traversal detected in name: {:?}", name));
+        }
         let path = self.base_path.join(name);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -33,6 +48,12 @@ impl SecretStorage {
     }
 
     pub fn save_secret_for_client(&self, client_id: &str, provider: &str, secret: &str) -> Result<String> {
+        if !is_safe_name(client_id) {
+            return Err(anyhow::anyhow!("Path traversal detected in client_id: {:?}", client_id));
+        }
+        if !is_safe_name(provider) {
+            return Err(anyhow::anyhow!("Path traversal detected in provider: {:?}", provider));
+        }
         let dir = self.base_path.join(client_id);
         fs::create_dir_all(&dir)?;
         
@@ -105,5 +126,63 @@ mod tests {
         assert_eq!(content2, "other-key");
         
         Ok(())
+    }
+
+    #[test]
+    fn test_rejects_path_traversal_in_load() {
+        let dir = tempdir().unwrap();
+        let storage = SecretStorage::new(dir.path().to_str().unwrap());
+
+        // Write a known valid file first
+        storage.save_secret("good.txt", "safe").unwrap();
+
+        // Loading a safe file should work
+        assert!(storage.load_secret("good.txt").is_ok());
+
+        // Path traversal attempts should fail
+        assert!(storage.load_secret("../outside.txt").is_err());
+        assert!(storage.load_secret("../../etc/passwd").is_err());
+        assert!(storage.load_secret("subdir/../../../etc/passwd").is_err());
+        assert!(storage.load_secret("..\\outside.txt").is_err());
+    }
+
+    #[test]
+    fn test_rejects_path_traversal_in_save() {
+        let dir = tempdir().unwrap();
+        let storage = SecretStorage::new(dir.path().to_str().unwrap());
+
+        // Saving to a valid path should work
+        assert!(storage.save_secret("new_file.txt", "data").is_ok());
+
+        // Path traversal attempts should fail
+        assert!(storage.save_secret("../outside.txt", "data").is_err());
+        assert!(storage.save_secret("../../etc/passwd", "data").is_err());
+    }
+
+    #[test]
+    fn test_rejects_path_traversal_in_client_storage() {
+        let dir = tempdir().unwrap();
+        let storage = SecretStorage::new(dir.path().to_str().unwrap());
+
+        // Normal client_id should work
+        assert!(storage.save_secret_for_client("normal_client", "openai", "key-1").is_ok());
+
+        // Traversal attempts should fail
+        assert!(storage.save_secret_for_client("../outside_client", "openai", "key-1").is_err());
+        assert!(storage.save_secret_for_client("../../etc/passwd", "openai", "key-1").is_err());
+    }
+
+    #[test]
+    fn test_rejects_path_traversal_in_provider() {
+        let dir = tempdir().unwrap();
+        let storage = SecretStorage::new(dir.path().to_str().unwrap());
+
+        // Normal provider should work
+        assert!(storage.save_secret_for_client("client1", "gemini", "key-1").is_ok());
+
+        // Traversal attempts in provider should fail
+        assert!(storage.save_secret_for_client("client1", "../malicious", "key-1").is_err());
+        assert!(storage.save_secret_for_client("client1", "../../../etc", "key-1").is_err());
+        assert!(storage.save_secret_for_client("client1", "..\\..\\windows", "key-1").is_err());
     }
 }

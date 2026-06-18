@@ -197,6 +197,139 @@ impl BalancerMcpServer {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AppConfig, ServerConfig, AuthConfig, PoolConfig, KeyConfig};
+    use std::sync::Arc;
+    use arc_swap::ArcSwap;
+
+    fn make_test_config() -> AppConfig {
+        AppConfig {
+            server: ServerConfig {
+                host: "0.0.0.0".to_string(),
+                port: 3317,
+                cors_allowed_origin: "http://localhost:3317".to_string(),
+            },
+            auth: AuthConfig {
+                enabled: false,
+                public_registration: false,
+                master_key: None,
+                admin_key: None,
+                secret: "test".to_string(),
+                issuer: "test".to_string(),
+                audience: "test".to_string(),
+            },
+            pools: vec![
+                PoolConfig {
+                    name: "pool-1".to_string(),
+                    description: Some("Primary pool".to_string()),
+                    provider: "openai".to_string(),
+                    target_url: "https://api.openai.com/v1".to_string(),
+                    capacity: 10,
+                    keys: vec![KeyConfig {
+                        id: "key-1".to_string(),
+                        rps_limit: Some(10),
+                        rpd_limit: None,
+                        tpm_limit: None,
+                        tpd_limit: None,
+                        max_request_tokens: None,
+                        cooldown_on_limit: Some(false),
+                        concurrency: 1,
+                        secret_name: "openai_key.txt".to_string(),
+                        secret_type: "bearer".to_string(),
+                    }],
+                    priority: 0,
+                    models_endpoint: None,
+                    skip_model_sync: false,
+                },
+                PoolConfig {
+                    name: "pool-2".to_string(),
+                    description: None,
+                    provider: "gemini".to_string(),
+                    target_url: "https://generativelanguage.googleapis.com".to_string(),
+                    capacity: 5,
+                    keys: vec![],
+                    priority: 0,
+                    models_endpoint: None,
+                    skip_model_sync: false,
+                },
+            ],
+        }
+    }
+
+    async fn make_mcp_server(config: AppConfig) -> BalancerMcpServer {
+        let config = Arc::new(ArcSwap::from(Arc::new(config)));
+        let db = crate::db::Database::new("sqlite::memory:").await.unwrap();
+        BalancerMcpServer {
+            pools: std::collections::HashMap::new(),
+            config,
+            storage: crate::storage::SecretStorage::new("secrets"),
+            http_client: reqwest::Client::new(),
+            db,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_pools_returns_all_pools() {
+        let config = make_test_config();
+        let server = make_mcp_server(config).await;
+        let pools = server.list_pools().await;
+
+        assert_eq!(pools.len(), 2);
+        assert_eq!(pools[0]["name"], "pool-1");
+        assert_eq!(pools[0]["description"], "Primary pool");
+        assert_eq!(pools[0]["key_count"], 1);
+        assert_eq!(pools[0]["capacity"], 10);
+        assert_eq!(pools[1]["name"], "pool-2");
+        assert_eq!(pools[1]["description"], "No description provided");
+        assert_eq!(pools[1]["key_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_update_pool_description() {
+        let config = make_test_config();
+        let server = make_mcp_server(config).await;
+
+        let args = UpdateDescriptionArgs {
+            pool_name: "pool-1".to_string(),
+            description: "Updated description".to_string(),
+        };
+        let result = server.update_pool_description(args).await;
+        assert!(result.is_ok());
+
+        // Verify the config was updated
+        let config = server.config.load();
+        let pool = config.pools.iter().find(|p| p.name == "pool-1").unwrap();
+        assert_eq!(pool.description.as_deref(), Some("Updated description"));
+    }
+
+    #[tokio::test]
+    async fn test_update_pool_description_not_found() {
+        let config = make_test_config();
+        let server = make_mcp_server(config).await;
+
+        let args = UpdateDescriptionArgs {
+            pool_name: "nonexistent".to_string(),
+            description: "Should fail".to_string(),
+        };
+        let result = server.update_pool_description(args).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_get_config_resource_redacts_secrets() {
+        let config = make_test_config();
+        let server = make_mcp_server(config).await;
+
+        let resource = server.get_config_resource().await;
+        assert_eq!(resource["auth"]["secret"], "[REDACTED]");
+        assert!(resource["server"]["host"].as_str().is_some());
+        assert!(resource["pools"].as_array().unwrap().len() == 2);
+    }
+}
+
 // Basic MCP JSON-RPC structures for transport integration
 #[derive(Debug, Deserialize)]
 pub struct McpRequest {

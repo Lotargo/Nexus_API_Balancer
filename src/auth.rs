@@ -73,3 +73,72 @@ impl AuthManager {
         ).map_err(|e| anyhow!("Token generation failed: {}", e))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AuthConfig;
+
+    fn make_auth_manager() -> AuthManager {
+        let config = AuthConfig {
+            enabled: true,
+            public_registration: false,
+            master_key: None,
+            admin_key: None,
+            secret: "test-secret-key".to_string(),
+            issuer: "test-issuer".to_string(),
+            audience: "test-audience".to_string(),
+        };
+        AuthManager::new(config)
+    }
+
+    #[test]
+    fn test_generate_and_validate_token() {
+        let auth = make_auth_manager();
+        let token = auth.generate_token("test-user", Some("client".to_string())).unwrap();
+        let claims = auth.validate_token(&token).unwrap();
+        assert_eq!(claims.sub, "test-user");
+        assert_eq!(claims.role.as_deref(), Some("client"));
+        assert_eq!(claims.iss, "test-issuer");
+        assert_eq!(claims.aud, "test-audience");
+    }
+
+    #[test]
+    fn test_validate_token_rejects_wrong_key() {
+        let auth = make_auth_manager();
+        let token = auth.generate_token("test-user", None).unwrap();
+
+        let bad_auth = AuthManager::new(AuthConfig {
+            enabled: true,
+            secret: "different-secret".to_string(),
+            ..make_auth_manager().config
+        });
+        assert!(bad_auth.validate_token(&token).is_err());
+    }
+
+    #[test]
+    fn test_validate_token_rejects_invalid() {
+        let auth = make_auth_manager();
+        assert!(auth.validate_token("invalid-token").is_err());
+    }
+
+    #[test]
+    fn test_disabled_auth_returns_anonymous() {
+        let auth = AuthManager::new(AuthConfig {
+            enabled: false,
+            ..make_auth_manager().config
+        });
+        let claims = auth.validate_token("anything").unwrap();
+        assert_eq!(claims.sub, "anonymous");
+        assert_eq!(claims.role, None);
+    }
+
+    #[test]
+    fn test_generate_token_with_admin_role() {
+        let auth = make_auth_manager();
+        let token = auth.generate_token("admin-user", Some("admin".to_string())).unwrap();
+        let claims = auth.validate_token(&token).unwrap();
+        assert_eq!(claims.sub, "admin-user");
+        assert_eq!(claims.role.as_deref(), Some("admin"));
+    }
+}

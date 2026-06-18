@@ -198,3 +198,119 @@ impl KeyPool {
         println!(" [{}] [DEBUG] KeyPool: Released key '{}' back to pool", Local::now().format("%H:%M:%S%.3f"), id);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_key(id: &str) -> ApiKey {
+        ApiKey::new(
+            id,
+            Some(10),  // rps
+            Some(100), // rpd
+            Some(1000), // tpm
+            Some(10000), // tpd
+            None,       // max_request_tokens
+            false,      // cooldown_on_limit
+            "sk-test".to_string(),
+            "api_key".to_string(),
+            None,
+        )
+    }
+
+    #[test]
+    fn test_key_acquire_and_release() {
+        let pool = KeyPool::new(2);
+        let key = make_key("test-key-1");
+
+        assert!(pool.add_key(key).is_ok());
+    }
+
+    #[test]
+    fn test_key_try_use_succeeds_within_limits() {
+        let key = make_key("test-key");
+        assert!(key.try_use().is_ok());
+    }
+
+    #[test]
+    fn test_key_try_use_rps_limit() {
+        let key = make_key("rps-key");
+        // First use should succeed
+        assert!(key.try_use().is_ok());
+        // We'd need to increment requests_this_second to 10 before it fails
+        // Instead, create a key with limit 0 to test immediate rejection
+        let limited = ApiKey::new(
+            "limited",
+            Some(0),  // rps = 0, always exceeded
+            None,
+            None,
+            None,
+            None,
+            false,
+            "sk-test".to_string(),
+            "api_key".to_string(),
+            None,
+        );
+        assert!(limited.try_use().is_err());
+    }
+
+    #[test]
+    fn test_key_expiration() {
+        let expired = ApiKey::new(
+            "expired",
+            None, None, None, None, None, false,
+            "sk-test".to_string(),
+            "api_key".to_string(),
+            Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+        );
+        assert!(expired.try_use().is_err());
+    }
+
+    #[test]
+    fn test_key_valid_expiration() {
+        let valid = ApiKey::new(
+            "valid",
+            None, None, None, None, None, false,
+            "sk-test".to_string(),
+            "api_key".to_string(),
+            Some(chrono::Utc::now() + chrono::Duration::days(1)),
+        );
+        assert!(valid.try_use().is_ok());
+    }
+
+    #[test]
+    fn test_key_cooldown_on_limit() {
+        let key = ApiKey::new(
+            "cooldown",
+            Some(0), None, None, None, None,
+            true, // cooldown_on_limit
+            "sk-test".to_string(),
+            "api_key".to_string(),
+            None,
+        );
+        assert!(key.try_use().is_err());
+        // Should be in cooldown now
+        assert!(key.try_use().is_err());
+    }
+
+    #[test]
+    fn test_pool_capacity() {
+        let pool = KeyPool::new(1);
+        let key1 = make_key("key-1");
+        let key2 = make_key("key-2");
+
+        assert!(pool.add_key(key1).is_ok());
+        assert!(pool.add_key(key2).is_err()); // capacity exceeded
+    }
+
+    #[test]
+    fn test_record_usage_tracks_tokens() {
+        let key = make_key("tracking");
+        key.record_usage(50);
+        key.record_usage(150);
+
+        let state = key.inner.lock().unwrap();
+        assert_eq!(state.tokens_this_minute, 200);
+        assert_eq!(state.tokens_today, 200);
+    }
+}

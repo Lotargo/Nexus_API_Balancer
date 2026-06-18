@@ -46,7 +46,7 @@ impl Database {
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .after_connect(|conn, _meta| Box::pin(async move {
-                sqlx::query("PRAGMA foreign_keys = OFF").execute(&mut *conn).await?;
+                sqlx::query("PRAGMA foreign_keys = ON").execute(&mut *conn).await?;
                 sqlx::query("PRAGMA busy_timeout = 5000").execute(&mut *conn).await?;
                 Ok(())
             }))
@@ -92,7 +92,7 @@ impl Database {
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS client_pools (
-                client_id TEXT NOT NULL,
+                client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
                 pool_id TEXT NOT NULL,
                 kv_cache BOOLEAN NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -310,5 +310,226 @@ impl Database {
         }
         tx.commit().await?;
         Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqliteConnectOptions;
+    use std::str::FromStr;
+
+    async fn make_db() -> Database {
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:").unwrap()
+            .create_if_missing(true)
+            .shared_cache(true);
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(2)
+            .after_connect(|conn, _meta| Box::pin(async move {
+                sqlx::query("PRAGMA foreign_keys = ON").execute(&mut *conn).await?;
+                sqlx::query("PRAGMA busy_timeout = 5000").execute(&mut *conn).await?;
+                Ok(())
+            }))
+            .connect_with(opts)
+            .await
+            .unwrap();
+
+        let db = Database { pool };
+
+        // Create tables manually (without running migrations)
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS clients (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                auth_token TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"
+        ).execute(&db.pool).await.unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS client_pools (
+                client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+                pool_id TEXT NOT NULL,
+                kv_cache BOOLEAN NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (client_id, pool_id)
+            )"
+        ).execute(&db.pool).await.unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS request_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_id TEXT,
+                key_id TEXT,
+                pool_id TEXT,
+                status TEXT NOT NULL,
+                latency_ms INTEGER,
+                tokens_used INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT,
+                request_ip TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"
+        ).execute(&db.pool).await.unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS provider_models (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider_name TEXT NOT NULL,
+                pool_name TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                owned_by TEXT,
+                context_window INTEGER,
+                capabilities TEXT,
+                is_stale BOOLEAN NOT NULL DEFAULT 0,
+                fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(provider_name, model_id)
+            )"
+        ).execute(&db.pool).await.unwrap();
+
+        db
+    }
+
+    #[tokio::test]
+    async fn test_register_and_get_client() {
+        let db = make_db().await;
+        db.register_client("client-1", "Test Client", "token-1").await.unwrap();
+
+        let pools = db.get_allowed_pools("client-1").await.unwrap();
+        assert!(pools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_set_and_get_pool_kv_cache() {
+        let db = make_db().await;
+        db.register_client("client-1", "Test Client", "token-1").await.unwrap();
+
+        db.set_pool_kv_cache("client-1", "pool-1", true).await.unwrap();
+
+        let pools = db.get_allowed_pools("client-1").await.unwrap();
+        assert_eq!(pools, vec!["pool-1"]);
+
+        let pools_ext = db.get_allowed_pools_ext("client-1").await.unwrap();
+        assert_eq!(pools_ext.get("pool-1"), Some(&true));
+    }
+
+    #[tokio::test]
+    async fn test_log_and_get_stats() {
+        let db = make_db().await;
+        db.register_client("client-1", "Test Client", "token-1").await.unwrap();
+
+        db.log_request(LogEntry {
+            client_id: Some("client-1".to_string()),
+            key_id: Some("key-1".to_string()),
+            pool_id: Some("pool-1".to_string()),
+            status: "success".to_string(),
+            latency_ms: Some(100),
+            tokens_used: 50,
+            error_message: None,
+            request_ip: None,
+        }).await.unwrap();
+
+        let stats = db.get_stats().await.unwrap();
+        assert_eq!(stats["total_requests"], 1);
+        assert!(stats["total_tokens"].as_i64().unwrap_or(0) > 0);
+    }
+
+    #[tokio::test]
+    async fn test_upsert_and_get_provider_models() {
+        let db = make_db().await;
+
+        let model = ProviderModel {
+            provider_name: "test-provider".to_string(),
+            pool_name: "test-pool".to_string(),
+            model_id: "test-model-1".to_string(),
+            owned_by: Some("test".to_string()),
+            context_window: Some(4096),
+            capabilities: None,
+        };
+
+        db.upsert_provider_model(&model).await.unwrap();
+
+        let models = db.get_all_models().await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].model_id, "test-model-1");
+        assert_eq!(models[0].pool_name, "test-pool");
+
+        let found = db.find_pools_for_model("test-model-1").await.unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "test-pool");
+    }
+
+    #[tokio::test]
+    async fn test_mark_stale_and_cleanup() {
+        let db = make_db().await;
+
+        let model = ProviderModel {
+            provider_name: "test-provider".to_string(),
+            pool_name: "test-pool".to_string(),
+            model_id: "test-model-1".to_string(),
+            owned_by: None,
+            context_window: None,
+            capabilities: None,
+        };
+
+        db.upsert_provider_model(&model).await.unwrap();
+        db.mark_provider_stale("test-provider").await.unwrap();
+
+        // get_all_models filters by is_stale = 0, so stale models are excluded
+        let models = db.get_all_models().await.unwrap();
+        assert_eq!(models.len(), 0);
+
+        // get_models_by_provider also filters stale
+        let provider_models = db.get_models_by_provider("test-provider").await.unwrap();
+        assert_eq!(provider_models.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_foreign_key_enforced() {
+        let db = make_db().await;
+
+        // client_pools requires a valid client_id reference
+        let result = sqlx::query(
+            "INSERT INTO client_pools (client_id, pool_id) VALUES (?, ?)"
+        )
+        .bind("nonexistent-client")
+        .bind("pool-1")
+        .execute(&db.pool)
+        .await;
+
+        // Should fail due to FK constraint
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_upsert_provider_models_batch() {
+        let db = make_db().await;
+
+        let models = vec![
+            ProviderModel {
+                provider_name: "provider-1".to_string(),
+                pool_name: "pool-1".to_string(),
+                model_id: "model-a".to_string(),
+                owned_by: None,
+                context_window: None,
+                capabilities: None,
+            },
+            ProviderModel {
+                provider_name: "provider-1".to_string(),
+                pool_name: "pool-1".to_string(),
+                model_id: "model-b".to_string(),
+                owned_by: None,
+                context_window: None,
+                capabilities: None,
+            },
+        ];
+
+        let count = db.upsert_provider_models_batch("provider-1", "pool-1", &models).await.unwrap();
+        assert_eq!(count, 2);
+
+        let all = db.get_all_models().await.unwrap();
+        assert_eq!(all.len(), 2);
     }
 }

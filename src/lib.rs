@@ -88,15 +88,7 @@ pub async fn run_server(config: AppConfig, db: Database, storage_path: &str) -> 
         storage.clone(),
     ));
 
-    // Initial sync (non-blocking failures per provider)
-    println!("[ModelRegistry] Starting initial model discovery...");
-    if let Err(errors) = model_registry.sync_all_providers().await {
-        for e in &errors {
-            eprintln!("[ModelRegistry] Warning: Initial sync had errors: {}", e);
-        }
-    }
-
-    // Count discovered models for startup banner
+    // Count discovered models for startup banner (initial sync handled by spawn_periodic_sync)
     let model_count = db.get_all_models().await.map(|m| m.len()).unwrap_or(0);
     let provider_count = {
         let mut providers: Vec<String> = config.pools.iter()
@@ -112,10 +104,19 @@ pub async fn run_server(config: AppConfig, db: Database, storage_path: &str) -> 
     model_registry.spawn_periodic_sync();
 
     let auth_manager = AuthManager::new(config.auth.clone());
+    let cors_origin = config.server.cors_allowed_origin.clone();
     let app = api::create_router(pools, auth_manager, shared_config, db, storage, model_registry)
         .merge(Scalar::with_url("/scalar", ApiDoc::openapi()))
         .layer(
-            tower_http::cors::CorsLayer::permissive()
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(tower_http::cors::AllowOrigin::predicate(
+                    move |origin: &axum::http::HeaderValue, _: &axum::http::request::Parts| {
+                        origin
+                            .to_str()
+                            .map(|o| o == cors_origin || o == "http://localhost:3317")
+                            .unwrap_or(false)
+                    },
+                ))
         );
     
     let addr_str = format!("{}:{}", config.server.host, config.server.port);

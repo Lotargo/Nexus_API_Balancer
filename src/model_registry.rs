@@ -210,7 +210,16 @@ impl ModelRegistry {
     pub fn spawn_periodic_sync(self: &Arc<Self>) {
         let registry = Arc::clone(self);
         tokio::spawn(async move {
+            // Initial sync at startup
+            println!("[ModelRegistry] Starting initial model discovery...");
+            if let Err(errors) = registry.sync_all_providers().await {
+                for e in &errors {
+                    eprintln!("[ModelRegistry] Warning: Initial sync had errors: {}", e);
+                }
+            }
+
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(6 * 3600));
+            // Skip the first tick (already did initial sync)
             interval.tick().await;
             loop {
                 interval.tick().await;

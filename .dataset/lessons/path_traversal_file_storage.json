@@ -1,0 +1,8 @@
+{
+  "topic": "Prevent path traversal in file-based secret storage",
+  "principle": "Never trust user-supplied file names or paths — validate that resolved paths stay within an expected base directory before reading or writing files.",
+  "instruction": "How do I securely store and load secrets by name without allowing path traversal attacks?",
+  "bad_example": "```rust\nfn load_secret(base: &Path, name: &str) -> Result<String> {\n    let path = base.join(name);\n    fs::read_to_string(path)\n}\n```\nThis allows `name = \"../../etc/passwd\"` to escape the secrets directory.",
+  "good_example": "```rust\nfn is_safe_name(name: &str) -> bool {\n    let path = std::path::Path::new(name);\n    !path.has_root()\n        && path.components().all(|c| matches!(c, std::path::Component::Normal(_)))\n}\n\nfn load_secret(base: &Path, name: &str) -> Result<String> {\n    if !is_safe_name(name) {\n        return Err(anyhow!(\"Path traversal detected\"));\n    }\n    let path = base.join(name);\n    fs::read_to_string(&path)\n}\n```\nRejects `../`, absolute paths, and empty components. Only allows `Normal` path segments.",
+  "tags": ["security", "path-traversal", "file-storage", "input-validation", "secrets"]
+}

@@ -158,3 +158,83 @@ fn push_text(segments: &mut Vec<String>, text: &str) {
         segments.push(text.to_owned());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_estimate_request_tokens_empty() {
+        let json = json!({});
+        let tokens = estimate_request_tokens(&json);
+        assert_eq!(tokens, 0);
+    }
+
+    #[test]
+    fn test_estimate_request_tokens_with_messages() {
+        let json = json!({
+            "messages": [
+                {"role": "user", "content": "hello world"},
+                {"role": "assistant", "content": "hi there"}
+            ]
+        });
+        let tokens = estimate_request_tokens(&json);
+        assert!(tokens > 0);
+    }
+
+    #[test]
+    fn test_estimate_request_tokens_with_prompt() {
+        let json = json!({
+            "prompt": "What is the capital of France?"
+        });
+        let tokens = estimate_request_tokens(&json);
+        assert!(tokens > 0);
+    }
+
+    #[test]
+    fn test_count_tokens_empty() {
+        assert_eq!(count_tokens(""), 0);
+    }
+
+    #[test]
+    fn test_count_tokens_simple() {
+        let count = count_tokens("hello world");
+        assert!(count > 0);
+    }
+
+    #[test]
+    fn test_estimate_response_tokens_empty() {
+        let json = json!({"candidates": []});
+        let tokens = estimate_response_tokens(&json);
+        assert_eq!(tokens, 0);
+    }
+
+    #[test]
+    fn test_estimate_response_tokens_with_text() {
+        let json = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{"text": "The capital of France is Paris."}]
+                }
+            }]
+        });
+        let tokens = estimate_response_tokens(&json);
+        assert!(tokens > 0);
+    }
+
+    #[test]
+    fn test_collect_all_string_segments_fallback() {
+        let json = json!({"unknown_field": "some text here"});
+        // When no known keys match, it should fall back to collecting all strings
+        let tokens = estimate_request_tokens(&json);
+        assert!(tokens > 0);
+    }
+
+    #[test]
+    fn test_count_tokens_large_text() {
+        let text = "word ".repeat(100);
+        let count = count_tokens(&text);
+        assert!(count > 10);
+    }
+}

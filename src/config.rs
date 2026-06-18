@@ -7,6 +7,12 @@ use utoipa::ToSchema;
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    #[serde(default = "default_cors_origin")]
+    pub cors_allowed_origin: String,
+}
+
+fn default_cors_origin() -> String {
+    "http://localhost:3317".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
@@ -71,12 +77,13 @@ impl AppConfig {
             "cohere" => Some("https://api.cohere.com/v2"),
             "mistral" => Some("https://api.mistral.ai/v1"),
             "deepseek" => Some("https://api.deepseek.com"),
+            "anthropic" | "claude" => Some("https://api.anthropic.com/v1"),
             _ => None,
         }
     }
 
     pub fn get_supported_providers() -> Vec<&'static str> {
-        vec!["openai", "gemini", "grok", "groq", "cerebras", "sambanova", "cohere", "mistral", "deepseek"]
+        vec!["openai", "gemini", "grok", "groq", "cerebras", "sambanova", "cohere", "mistral", "deepseek", "anthropic"]
     }
 
     pub fn load(path: &str) -> Result<Self> {
@@ -112,5 +119,78 @@ impl AppConfig {
         let content = serde_yaml::to_string(self)?;
         fs::write(path, content)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_standard_url_known_providers() {
+        assert_eq!(AppConfig::get_standard_url("openai"), Some("https://api.openai.com/v1"));
+        assert_eq!(AppConfig::get_standard_url("gemini"), Some("https://generativelanguage.googleapis.com"));
+        assert_eq!(AppConfig::get_standard_url("google"), Some("https://generativelanguage.googleapis.com"));
+        assert_eq!(AppConfig::get_standard_url("anthropic"), Some("https://api.anthropic.com/v1"));
+        assert_eq!(AppConfig::get_standard_url("claude"), Some("https://api.anthropic.com/v1"));
+        assert_eq!(AppConfig::get_standard_url("grok"), Some("https://api.x.ai/v1"));
+        assert_eq!(AppConfig::get_standard_url("xai"), Some("https://api.x.ai/v1"));
+        assert_eq!(AppConfig::get_standard_url("mistral"), Some("https://api.mistral.ai/v1"));
+        assert_eq!(AppConfig::get_standard_url("deepseek"), Some("https://api.deepseek.com"));
+    }
+
+    #[test]
+    fn test_get_standard_url_unknown_provider() {
+        assert_eq!(AppConfig::get_standard_url("nonexistent"), None);
+        assert_eq!(AppConfig::get_standard_url(""), None);
+    }
+
+    #[test]
+    fn test_get_standard_url_case_insensitive() {
+        assert_eq!(AppConfig::get_standard_url("OpenAI"), Some("https://api.openai.com/v1"));
+        assert_eq!(AppConfig::get_standard_url("ANTHROPIC"), Some("https://api.anthropic.com/v1"));
+    }
+
+    #[test]
+    fn test_get_supported_providers_includes_anthropic() {
+        let providers = AppConfig::get_supported_providers();
+        assert!(providers.contains(&"anthropic"));
+        assert!(providers.contains(&"openai"));
+        assert!(providers.contains(&"gemini"));
+        assert!(providers.contains(&"mistral"));
+    }
+
+    #[test]
+    fn test_load_rejects_path_traversal() {
+        assert!(AppConfig::load("../outside.yaml").is_err());
+        assert!(AppConfig::load("../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn test_save_rejects_path_traversal() {
+        let config = AppConfig {
+            server: ServerConfig {
+                host: "0.0.0.0".to_string(),
+                port: 3317,
+                cors_allowed_origin: "http://localhost:3317".to_string(),
+            },
+            auth: AuthConfig {
+                enabled: false,
+                public_registration: false,
+                master_key: None,
+                admin_key: None,
+                secret: "test".to_string(),
+                issuer: "test".to_string(),
+                audience: "test".to_string(),
+            },
+            pools: vec![],
+        };
+        assert!(config.save("../outside.yaml").is_err());
+        assert!(config.save("../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn test_default_cors_origin() {
+        assert_eq!(default_cors_origin(), "http://localhost:3317");
     }
 }

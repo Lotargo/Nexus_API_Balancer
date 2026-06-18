@@ -592,6 +592,7 @@ async fn handle_execute(
         handle_public_register,
         handle_export_key,
         handle_import_key,
+        handle_list_models,
     ),
     components(
         schemas(
@@ -630,7 +631,7 @@ async fn handle_register_client(
     Json(payload): Json<RegisterClientRequest>,
 ) -> impl IntoResponse {
     let client_id = payload.id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let token = state.auth.generate_token(&client_id, Some("admin".to_string())).unwrap();
+    let token = state.auth.generate_token(&client_id, Some("client".to_string())).unwrap();
     
     if let Err(e) = state.db.register_client(&client_id, &payload.name, &token).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("Error: {}", e)).into_response();
@@ -1054,6 +1055,18 @@ async fn handle_mcp(
     mcp_error(request.id, -32601, "Method not found")
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/models",
+    responses(
+        (status = 200, description = "List of available models", body = serde_json::Value),
+        (status = 401, description = "Unauthorized")
+    ),
+    security(
+        ("bearer_auth" = []),
+        ("admin_key" = [])
+    )
+)]
 async fn handle_list_models(
     State(state): State<Arc<AppState>>,
     token: AuthToken,
