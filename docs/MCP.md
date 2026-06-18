@@ -15,12 +15,6 @@ List all pools with descriptions, key counts, and capacity.
 
 **Auth**: Any authenticated client (non-admin sees only their allowed pools)
 
-### `get_config`
-
-Returns the full application config (secrets redacted).
-
-**Auth**: Any authenticated client
-
 ### `update_description`
 
 Update a pool's description.
@@ -66,6 +60,24 @@ Import a new key into a pool. Validates the key against the provider's API befor
 ```
 
 If the pool does not exist and `provider` is specified, the pool is auto-created.
+
+## Resources
+
+### `config://main`
+
+Returns the full application config (secrets redacted).
+
+**Auth**: Any authenticated client
+
+**Example**:
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "resources/read",
+  "params": { "uri": "config://main" }
+}
+```
 
 ## Running the stdio client
 
