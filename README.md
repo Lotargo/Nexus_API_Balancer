@@ -1,7 +1,7 @@
 # Nexus API Balancer
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![OAuth 2.1](https://img.shields.io/badge/Security-OAuth_2.1-green.svg)](https://oauth.net/2.1/)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-red.svg)](https://modelcontextprotocol.io/)
 [![Scalar](https://img.shields.io/badge/Docs-Scalar-yellow.svg)](https://scalar.com/)
@@ -30,7 +30,7 @@ graph TD
 
     API -- Key acquisition --> Pool[Key Pool]
     Pool -- Load from storage --> Storage[Isolated Storage]
-    API -- v1beta conversion --> Provider[Gemini / OpenAI / Anthropic / Groq / Mistral / Cerebras]
+    API -- v1beta conversion --> Provider[Gemini / OpenAI / Anthropic / Groq / Mistral / Cerebras / SambaNova / DeepSeek / Cohere / xAI]
     API -- Latency logging --> Log[Console/DB]
 ```
 
@@ -42,11 +42,12 @@ graph TD
 - **Dynamic Model Registry**: Automatic discovery of available models via provider `/models` endpoints on startup and every 6 hours. Models are stored in SQLite with an in-memory cache for fast O(1) lookup.
 - **Priority-based routing**: Pool priority (`priority` in config) determines which provider receives a request when a model is available from multiple providers.
 - **Unified Routing Gateway**: Automatic request routing to the appropriate providers based on the dynamic model registry (with fallback to prefix-based heuristics).
-- **Multi-Provider Support**: Built-in support for OpenAI, Google Gemini, Anthropic Claude, Groq, Mistral, Cerebras, Cohere, DeepSeek, and xAI (Grok).
+- **Multi-Provider Support**: Built-in support for OpenAI, Google Gemini, Anthropic Claude, Groq, Mistral, Cerebras, Cohere, DeepSeek, xAI (Grok), and SambaNova.
 - **Aggregated `/v1/models` Endpoint**: OpenAI-compatible endpoint returning all models available to the client from the registry.
 - **Intelligent KV Cache**: Context cache management per pool with automatic endpoint transformation (e.g., for Google Gemini v1beta).
 - **Multi-Key Secrets**: Ability to load multiple API keys from a single file (one key per line) with automatic unique identifier generation and rotation.
 - **Client Isolation**: Secure key separation and client access restriction to assigned pools.
+- **CORS Protection**: Configurable CORS policy via `cors_allowed_origin` config or `CORS_ALLOWED_ORIGIN` env var (default: `http://localhost:3317`).
 - **MCP Protocol Support**: Full Model Context Protocol integration for dynamic pool discovery and administration.
 - **Interactive Documentation**: Built-in interactive API specification via Scalar at `/scalar`.
 
@@ -288,7 +289,10 @@ Each proxied request is logged in real-time with precise latency measurements:
 
 - **Authorization**: Access to the proxy server is only possible with a valid `Authorization: Bearer <token>` header.
 - **Secret isolation**: All client key files are physically isolated at the filesystem level.
+- **CORS**: Restricted to configured origin (default `http://localhost:3317`), configurable via `cors_allowed_origin` or `CORS_ALLOWED_ORIGIN` env var.
+- **Path traversal protection**: All file paths are validated against `..` and absolute path components.
 - **Interactive panel**: For testing and exploring all endpoints, use the Scalar documentation at `http://localhost:3317/scalar`.
+- See [docs/SECURITY.md](docs/SECURITY.md) for a full security reference.
 
 ---
 

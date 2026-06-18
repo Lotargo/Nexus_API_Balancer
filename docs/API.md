@@ -26,15 +26,15 @@ Interactive docs available at `/scalar` (via utoipa-scalar).
 | `GET` | `/stats` | Admin | Request statistics (count, tokens, success rate) |
 | `GET` | `/config` | Admin | Current configuration (secrets redacted) |
 | `PATCH` | `/config` | Admin | Update server/auth config at runtime |
-| `POST` | `/admin/clients` | Admin | Register a new client |
-| `GET` | `/admin/keys/{pool}/{key_id}` | Admin | Export key with secret |
-| `POST` | `/admin/keys/{pool}` | Admin | Import a new key |
+| `POST` | `/admin/clients` | Admin | Register a new client (returns 201) |
+| `GET` | `/admin/keys/{pool}/{key_id}` | Admin | Export key with secret (200) |
+| `POST` | `/admin/keys/{pool}` | Bearer | Import a new key (returns 201). Non-admin clients require pool authorization |
 
 ### Public
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/auth/register` | None | Self-registration (if enabled) |
+| `POST` | `/auth/register` | None | Self-registration if enabled (returns 201, 403 if disabled) |
 
 ### MCP
 
@@ -61,4 +61,4 @@ Interactive docs available at `/scalar` (via utoipa-scalar).
 The unified gateway (`/v1/*`) routes by:
 1. **Explicit prefix**: `//provider//model_name` in the model field
 2. **Model Registry**: O(1) lookup from auto-discovered models
-3. **Heuristic fallback**: model name prefix matching (gpt- → openai, claude- → anthropic, etc.)
+3. **Heuristic fallback**: model name prefix matching (gpt- → openai, claude- → anthropic, gemini- → gemini, etc.)

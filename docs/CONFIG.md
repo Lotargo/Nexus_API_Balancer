@@ -1,6 +1,6 @@
 # Configuration
 
-Configuration is loaded from `config.yaml` with optional `.env` overrides.
+Configuration is loaded from `config.yaml` with optional env var overrides.
 
 ## config.yaml
 
@@ -61,8 +61,8 @@ API keys are stored in a `secrets/` directory (configurable path passed to `run_
 
 ## Supported Providers
 
-| Provider | Default Target URL |
-|----------|--------------------|
+| Identifier | Default Target URL |
+|------------|--------------------|
 | openai | `https://api.openai.com/v1` |
 | gemini / google | `https://generativelanguage.googleapis.com` |
 | gemini-openai | `https://generativelanguage.googleapis.com/v1beta/openai` |
@@ -74,6 +74,8 @@ API keys are stored in a `secrets/` directory (configurable path passed to `run_
 | mistral | `https://api.mistral.ai/v1` |
 | deepseek | `https://api.deepseek.com` |
 | anthropic / claude | `https://api.anthropic.com/v1` |
+
+Note: `gemini-openai` is a target URL pattern (Google's OpenAI-compatible endpoint), not a provider name recognized by `get_standard_url()`. Set `target_url` explicitly in pool config to use it.
 
 ## Key Capacity Calculation
 

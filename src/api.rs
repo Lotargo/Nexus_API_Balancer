@@ -731,7 +731,7 @@ async fn handle_export_key(
         (status = 404, description = "Pool not found"),
         (status = 403, description = "Forbidden")
     ),
-    security(("admin_key" = []))
+    security(("bearer_auth" = []))
 )]
 async fn handle_import_key(
     State(state): State<Arc<AppState>>,

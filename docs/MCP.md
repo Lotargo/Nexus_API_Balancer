@@ -7,77 +7,77 @@ nexus_balancer implements a JSON-RPC 2.0 MCP server for programmatic pool and ke
 - **Server**: JSON-RPC over HTTP at `POST /mcp`
 - **Client**: stdio-to-HTTP bridge (`nexus_balancer mcp`), reads JSON-RPC from stdin, forwards to server, writes response to stdout
 
-## Methods
+## Protocol
 
-### `list_pools`
+Methods are dispatched via JSON-RPC 2.0. Tool execution is wrapped under `tools/call`.
 
-List all pools with descriptions, key counts, and capacity.
+### `initialize`
 
-**Auth**: Any authenticated client (non-admin sees only their allowed pools)
+Standard MCP initialization. Returns protocol version and server capabilities.
 
-### `update_description`
+**Params**: none required
 
-Update a pool's description.
+### `notifications/initialized`
 
-**Auth**: Admin only
+Sent by the client after receiving the `initialize` result. Server returns an empty result.
 
-**Params**:
-```json
-{ "pool_name": "my-pool", "description": "New description" }
-```
+### `tools/list`
 
-### `export_key`
+List all available tools.
 
-Export a key with its secret by pool name and key ID.
+**Auth**: Any authenticated client
 
-**Auth**: Admin only
+**Tools returned**:
+- `list_pools` — list pools and status
+- `update_description` — update pool description (admin only)
+- `export_key` — export key and secret (admin only)
+- `import_key` — import a new key to a pool (admin or client with pool authorization)
 
-**Params**:
-```json
-{ "pool_name": "my-pool", "key_id": "key-1" }
-```
+### `tools/call`
 
-### `import_key`
+Execute a tool.
 
-Import a new key into a pool. Validates the key against the provider's API before saving.
-
-**Auth**: Admin only
+**Auth**: Depends on the tool (see above)
 
 **Params**:
 ```json
 {
-  "pool_name": "my-pool",
-  "key_cfg": {
-    "id": "key-2",
-    "concurrency": 2,
-    "secret_type": "bearer",
-    "rps_limit": 10
-  },
-  "secret": "sk-...",
-  "provider": null,
-  "kv_cache": false
+  "name": "import_key",
+  "arguments": {
+    "pool_name": "my-pool",
+    "key_cfg": {
+      "id": "key-2",
+      "concurrency": 2,
+      "secret_type": "bearer",
+      "rps_limit": 10
+    },
+    "secret": "sk-...",
+    "provider": null,
+    "kv_cache": false
+  }
 }
 ```
 
 If the pool does not exist and `provider` is specified, the pool is auto-created.
 
-## Resources
+### `resources/list`
 
-### `config://main`
+List available resources. Returns `config://main`.
 
-Returns the full application config (secrets redacted).
+### `resources/read`
+
+Read a resource.
 
 **Auth**: Any authenticated client
 
-**Example**:
+**Params**:
 ```json
 {
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "resources/read",
-  "params": { "uri": "config://main" }
+  "uri": "config://main"
 }
 ```
+
+Returns the full application config (secrets redacted).
 
 ## Running the stdio client
 

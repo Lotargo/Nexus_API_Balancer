@@ -105,6 +105,9 @@ impl AppConfig {
                 config.server.port = port;
             }
         }
+        if let Ok(origin) = std::env::var("CORS_ALLOWED_ORIGIN") {
+            config.server.cors_allowed_origin = origin;
+        }
 
         Ok(config)
     }
@@ -192,5 +195,38 @@ mod tests {
     #[test]
     fn test_default_cors_origin() {
         assert_eq!(default_cors_origin(), "http://localhost:3317");
+    }
+
+    #[test]
+    fn test_load_respects_cors_env_var() {
+        let original = std::env::var("CORS_ALLOWED_ORIGIN").ok();
+        // SAFETY: test-only env var mutation, single-threaded test
+        unsafe { std::env::set_var("CORS_ALLOWED_ORIGIN", "https://example.com"); }
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("test_config.yaml");
+        let yaml = r#"
+server:
+  host: "127.0.0.1"
+  port: 9999
+  cors_allowed_origin: "http://localhost:3317"
+auth:
+  enabled: false
+  public_registration: false
+  secret: "test"
+  issuer: "test"
+  audience: "test"
+pools: []
+"#;
+        std::fs::write(&config_path, yaml).unwrap();
+        let config = AppConfig::load(config_path.to_str().unwrap()).unwrap();
+        assert_eq!(config.server.cors_allowed_origin, "https://example.com");
+
+        // SAFETY: test-only env var restore, single-threaded test
+        if let Some(val) = original {
+            unsafe { std::env::set_var("CORS_ALLOWED_ORIGIN", val); }
+        } else {
+            unsafe { std::env::remove_var("CORS_ALLOWED_ORIGIN"); }
+        }
     }
 }
