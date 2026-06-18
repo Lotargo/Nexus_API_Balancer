@@ -27,3 +27,6 @@ config.yaml
 
 # temp
 FIXMAP.md
+
+# Agent protocols (internal)
+AGENTS.md
