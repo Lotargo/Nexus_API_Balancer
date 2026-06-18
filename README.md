@@ -7,56 +7,56 @@
 [![Scalar](https://img.shields.io/badge/Docs-Scalar-yellow.svg)](https://scalar.com/)
 [![SQLx](https://img.shields.io/badge/Database-SQLx-blue.svg)](https://github.com/launchbadge/sqlx)
 
-Nexus API Balancer — это высокопроизводительный прокси-сервер и интеллектуальный балансировщик ключей для различных AI-провайдеров на базе Rust. Система предоставляет Dynamic Model Registry (автоматическое обнаружение моделей через `/models` эндпоинты провайдеров), возможности контекстного кэширования, детального логирования задержек, динамической балансировки нагрузки и изоляции клиентов.
+Nexus API Balancer is a high-performance proxy server and intelligent key balancer for various AI providers built on Rust. The system provides a Dynamic Model Registry (automatic model discovery via `/models` endpoints of providers), context caching capabilities, detailed latency logging, dynamic load balancing, and client isolation.
 
 ---
 
-## Архитектура системы
+## System Architecture
 
 ```mermaid
 graph TD
-    Client[AI Клиент / Cline / Roo Code] -- OAuth 2.1 Bearer --> API[Axum REST/MCP API]
-    Admin[Администратор] -- X-Admin-Key --> API
-    API -- Проверка авторизации --> DB[(SQLite DB)]
-    API -- Проверка KV-кэша --> DB
-    API -- Маршрутизация модели --> Registry[Model Registry]
+    Client[AI Client / Cline / Roo Code] -- OAuth 2.1 Bearer --> API[Axum REST/MCP API]
+    Admin[Administrator] -- X-Admin-Key --> API
+    API -- Authorization check --> DB[(SQLite DB)]
+    API -- KV cache check --> DB
+    API -- Model routing --> Registry[Model Registry]
 
     subgraph "Dynamic Model Discovery"
         Registry -- in-memory cache --> Cache[model → pool mapping]
-        Registry -- периодическая синхронизация (6ч) --> ProviderAPI["/models эндпоинты провайдеров"]
-        ProviderAPI -- OpenAI-compat / Gemini формат --> Registry
-        Registry -- upsert моделей --> DB
+        Registry -- periodic sync (6h) --> ProviderAPI["/models endpoints of providers"]
+        ProviderAPI -- OpenAI-compat / Gemini format --> Registry
+        Registry -- model upsert --> DB
     end
 
-    API -- Получение ключа --> Pool[Пул ключей]
-    Pool -- Загрузка из хранилища --> Storage[Изолированное хранилище]
-    API -- Преобразование v1beta --> Provider[Gemini / OpenAI / Anthropic / Groq / Mistral / Cerebras]
-    API -- Логирование задержки --> Log[Консоль/БД]
+    API -- Key acquisition --> Pool[Key Pool]
+    Pool -- Load from storage --> Storage[Isolated Storage]
+    API -- v1beta conversion --> Provider[Gemini / OpenAI / Anthropic / Groq / Mistral / Cerebras]
+    API -- Latency logging --> Log[Console/DB]
 ```
 
 ---
 
-## Основные возможности
+## Key Features
 
-- **Высокая параллелизация**: Эффективное асинхронное управление пулами запросов с использованием `tokio` и `async-channel`.
-- **Dynamic Model Registry**: Автоматическое обнаружение доступных моделей через `/models` эндпоинты провайдеров при старте и каждые 6 часов. Модели хранятся в SQLite с in-memory кешем для быстрого O(1) lookup.
-- **Priority-based routing**: Приоритет пула (`priority` в конфиге) определяет, какой провайдер получит запрос, если модель доступна у нескольких провайдеров.
-- **Единый шлюз маршрутизации**: Автоматическое перенаправление запросов на нужных провайдеров на основе динамического реестра моделей (с fallback на эвристики по префиксам).
-- **Поддержка множества провайдеров**: Из коробки поддерживаются OpenAI, Google Gemini, Anthropic Claude, Groq, Mistral, Cerebras, Cohere, DeepSeek и xAI (Grok).
-- **Агрегирующий эндпоинт `/v1/models`**: OpenAI-совместимый эндпоинт, возвращающий все доступные клиенту модели из реестра.
-- **Интеллектуальный KV Cache**: Управление кэшем контекста для каждого пула с автоматической трансформацией эндпоинтов (например, для Google Gemini v1beta).
-- **Мультиключевые секреты**: Возможность загрузки нескольких API-ключей из одного файла (по одному ключу на строку) с автоматической генерацией уникальных идентификаторов и ротацией между ними.
-- **Изоляция клиентов**: Безопасное разделение ключей и ограничение доступа клиентов к назначенным пулам.
-- **Поддержка протокола MCP**: Полная интеграция Model Context Protocol для динамического обнаружения пулов и администрирования.
-- **Интерактивная документация**: Встроенная интерактивная спецификация API через Scalar по адресу `/scalar`.
+- **High Concurrency**: Efficient async request pool management using `tokio` and `async-channel`.
+- **Dynamic Model Registry**: Automatic discovery of available models via provider `/models` endpoints on startup and every 6 hours. Models are stored in SQLite with an in-memory cache for fast O(1) lookup.
+- **Priority-based routing**: Pool priority (`priority` in config) determines which provider receives a request when a model is available from multiple providers.
+- **Unified Routing Gateway**: Automatic request routing to the appropriate providers based on the dynamic model registry (with fallback to prefix-based heuristics).
+- **Multi-Provider Support**: Built-in support for OpenAI, Google Gemini, Anthropic Claude, Groq, Mistral, Cerebras, Cohere, DeepSeek, and xAI (Grok).
+- **Aggregated `/v1/models` Endpoint**: OpenAI-compatible endpoint returning all models available to the client from the registry.
+- **Intelligent KV Cache**: Context cache management per pool with automatic endpoint transformation (e.g., for Google Gemini v1beta).
+- **Multi-Key Secrets**: Ability to load multiple API keys from a single file (one key per line) with automatic unique identifier generation and rotation.
+- **Client Isolation**: Secure key separation and client access restriction to assigned pools.
+- **MCP Protocol Support**: Full Model Context Protocol integration for dynamic pool discovery and administration.
+- **Interactive Documentation**: Built-in interactive API specification via Scalar at `/scalar`.
 
 ---
 
-## Руководство по развертыванию и настройке
+## Deployment and Configuration Guide
 
-### Шаг 1: Подготовка окружения
+### Step 1: Environment Setup
 
-Создайте файлы конфигурации и окружения из шаблонов, а также директорию для хранения секретов:
+Create configuration and environment files from templates, along with a directory for storing secrets:
 
 ```bash
 cp .env.example .env
@@ -64,48 +64,48 @@ cp config.yaml.example config.yaml
 mkdir -p secrets
 ```
 
-Настройте параметры в файле `.env` (например, секреты администратора, порты и параметры подключения к БД).
+Configure parameters in the `.env` file (e.g., admin secrets, ports, and database connection settings).
 
-### Шаг 2: Конфигурация пулов и провайдеров (`config.yaml`)
+### Step 2: Pool and Provider Configuration (`config.yaml`)
 
-Файл `config.yaml` определяет структуру пулов и правила распределения запросов. Каждый пул привязывается к конкретному провайдеру.
+The `config.yaml` file defines the pool structure and request distribution rules. Each pool is tied to a specific provider.
 
-Пример структуры пула с новыми полями для Model Registry:
+Example pool structure with Model Registry fields:
 
 ```yaml
 pools:
   - name: "openai-pool"
-    description: "Основной пул для запросов к OpenAI совместимым API"
+    description: "Main pool for requests to OpenAI-compatible APIs"
     provider: "openai"
     target_url: "https://api.openai.com"
     capacity: 20
-    priority: 10                    # Приоритет пула (выше = предпочтительнее при конфликте моделей)
-    models_endpoint: "/models"      # Кастомный эндпоинт для discovery моделей (опционально)
-    skip_model_sync: false          # Отключить auto-discovery для этого пула
+    priority: 10                    # Pool priority (higher = preferred when models conflict)
+    models_endpoint: "/models"      # Custom endpoint for model discovery (optional)
+    skip_model_sync: false          # Disable auto-discovery for this pool
     keys:
       - id: "OPENAI_KEY_GROUP"
-        secret_name: "openai_keys.txt" # Имя файла внутри директории secrets/
+        secret_name: "openai_keys.txt" # Filename inside the secrets/ directory
         secret_type: "api_key"
-        concurrency: 5 # Максимальное количество параллельных запросов на один ключ
-        rps_limit: 10 # Лимит запросов в секунду (RPS)
-        tpm_limit: 60000 # Лимит токенов в минуту (TPM)
-        max_request_tokens: 16000 # Ограничение на максимальный размер контекста одного запроса
-        cooldown_on_limit: true # Отправлять ключ на "остывание" при превышении лимитов
+        concurrency: 5 # Maximum concurrent requests per key
+        rps_limit: 10 # Requests per second limit (RPS)
+        tpm_limit: 60000 # Tokens per minute limit (TPM)
+        max_request_tokens: 16000 # Maximum context size limit per request
+        cooldown_on_limit: true # Send key to cooldown when limits are exceeded
 ```
 
-**Поля Model Registry:**
-- `priority` — целое число. При конфликте моделей (одна модель у нескольких провайдеров) запрос направляется в пул с наибольшим `priority`.
-- `models_endpoint` — опциональный путь к эндпоинту списка моделей провайдера. По умолчанию `/models`. Для Google Gemini — `/models` (парсится отдельно).
-- `skip_model_sync` — если `true`, пул исключается из auto-discovery моделей при старте и периодической синхронизации.
+**Model Registry Fields:**
+- `priority` — integer. When models conflict (the same model available from multiple providers), the request is routed to the pool with the highest `priority`.
+- `models_endpoint` — optional path to the provider's model list endpoint. Defaults to `/models`. For Google Gemini — `/models` (parsed separately).
+- `skip_model_sync` — if `true`, the pool is excluded from model auto-discovery on startup and periodic sync.
 
-### Шаг 3: Добавление API-ключей
+### Step 3: Adding API Keys
 
-Ключи хранятся в изолированных текстовых файлах в директории `secrets/`. Балансировщик поддерживает как одиночные ключи, так и списки ключей.
+Keys are stored in isolated text files within the `secrets/` directory. The balancer supports both single keys and key lists.
 
-Чтобы добавить несколько ключей для пула (например, для `openai-pool`, у которого указан `secret_name: "openai_keys.txt"`):
+To add multiple keys for a pool (e.g., for `openai-pool` with `secret_name: "openai_keys.txt"`):
 
-1. Создайте файл `secrets/openai_keys.txt`.
-2. Впишите ваши API-ключи, разделяя их переносом строки:
+1. Create the file `secrets/openai_keys.txt`.
+2. Enter your API keys, separated by newlines:
 
 ```text
 sk-proj-11111111111111111111
@@ -113,86 +113,86 @@ sk-proj-22222222222222222222
 sk-proj-33333333333333333333
 ```
 
-Балансировщик автоматически считает все ключи из файла, зарегистрирует их под уникальными именами (`OPENAI_KEY_GROUP#1`, `OPENAI_KEY_GROUP#2` и т. д.) и будет равномерно распределять и ротировать запросы между ними.
+The balancer automatically reads all keys from the file, registers them under unique names (`OPENAI_KEY_GROUP#1`, `OPENAI_KEY_GROUP#2`, etc.), and evenly distributes and rotates requests among them.
 
-### Шаг 4: Запуск балансировщика
+### Step 4: Running the Balancer
 
-Запустите проект с помощью Cargo:
+Run the project using Cargo:
 
 ```bash
 cargo run
 ```
 
-Балансировщик запустит HTTP-сервер на хосте и порту, указанных в `config.yaml` (по умолчанию `http://0.0.0.0:3317`).
+The balancer will start an HTTP server on the host and port specified in `config.yaml` (default `http://0.0.0.0:3317`).
 
 ---
 
-## Подключение к клиентам (Cline, Roo Code, OpenCode)
+## Client Connection (Cline, Roo Code, OpenCode)
 
-Балансировщик предоставляет единую точку доступа (Unified Gateway) по адресу `http://localhost:3317/v1/chat/completions`, которая полностью совместима со стандартом OpenAI API. Балансировщик автоматически анализирует поле `model` в запросе и направляет его в нужный пул провайдера.
+The balancer provides a Unified Gateway at `http://localhost:3317/v1/chat/completions`, fully compatible with the OpenAI API standard. The balancer automatically parses the `model` field in the request and routes it to the appropriate provider pool.
 
-При авторизации используется токен клиента (JWT), сгенерированный при регистрации клиента, либо мастер-токен из конфигурации.
+Authorization uses a client token (JWT) generated during client registration, or a master token from the configuration.
 
-### Настройка в Cline / Roo Code / Roo Cline
+### Configuration in Cline / Roo Code / Roo Cline
 
-Для интеграции балансировщика в расширения VS Code (например, Cline или Roo Code) выполните следующие шаги:
+To integrate the balancer into VS Code extensions (e.g., Cline or Roo Code), follow these steps:
 
-1. Откройте настройки провайдера моделей в расширении.
-2. Выберите провайдер: **OpenAI Compatible**.
-3. Укажите параметры подключения:
+1. Open the model provider settings in the extension.
+2. Select provider: **OpenAI Compatible**.
+3. Specify connection parameters:
    - **Base URL (API URL)**: `http://localhost:3317`
-   - **API Key**: Вставьте ваш токен клиента (JWT) или мастер-ключ (например, `nexus-master-key-2026`).
-   - **Model ID**: Введите имя желаемой модели.
-4. Нажмите кнопку подключения/сохранения.
+   - **API Key**: Paste your client token (JWT) or master key (e.g., `nexus-master-key-2026`).
+   - **Model ID**: Enter the desired model name.
+4. Click the connect/save button.
 
-### Настройка в OpenCode
+### Configuration in OpenCode
 
-**Способ 1: OpenAI Compatible (по умолчанию)**
+**Method 1: OpenAI Compatible (default)**
 
-1. Откройте настройки расширения OpenCode.
-2. Установите следующие значения в конфигурации:
-   - URL эндпоинта: `http://localhost:3317`
-   - Токен авторизации (API Key): `<ваш JWT токен клиента>`
-3. Выберите или укажите модель. Балансировщик автоматически выполнит маршрутизацию на основе динамического реестра моделей:
+1. Open the OpenCode extension settings.
+2. Set the following values in configuration:
+   - Endpoint URL: `http://localhost:3317`
+   - Authorization token (API Key): `<your JWT client token>`
+3. Select or specify a model. The balancer will automatically route based on the dynamic model registry:
 
-   **Автоматический роутинг:**
-   Модель определяется через Dynamic Model Registry — при старте и каждые 6 часов балансировщик опрашивает `/models` эндпоинты всех провайдеров и строит карту `model → pool`. Если модель найдена в реестре, запрос направляется в пул с наивысшим `priority`. Если модель не найдена, используется fallback по префиксам.
+   **Automatic Routing:**
+   The model is resolved through the Dynamic Model Registry — on startup and every 6 hours, the balancer queries the `/models` endpoints of all providers and builds a `model → pool` mapping. If the model is found in the registry, the request is routed to the pool with the highest `priority`. If the model is not found, a prefix-based fallback is used.
 
-   **Явный провайдер (`//provider//model`):**
-   Можно принудительно указать провайдера в имени модели:
-   - `//cerebras//llama-3.1-8b` — направить в Cerebras
-   - `//groq//llama-3.1-8b` — направить в Groq
-   - `//sambanova//llama-3.1-8b` — направить в SambaNova
-   - `//openai//gpt-4o` — направить в OpenAI
+   **Explicit Provider (`//provider//model`):**
+   You can force a specific provider in the model name:
+   - `//cerebras//llama-3.1-8b` — route to Cerebras
+   - `//groq//llama-3.1-8b` — route to Groq
+   - `//sambanova//llama-3.1-8b` — route to SambaNova
+   - `//openai//gpt-4o` — route to OpenAI
 
-   **Агрегирующий эндпоинт `/v1/models`:**
-   Позволяет клиентам получить список всех доступных моделей:
+   **Aggregated `/v1/models` Endpoint:**
+   Allows clients to retrieve a list of all available models:
    ```bash
    curl http://localhost:3317/v1/models -H "Authorization: Bearer <token>"
    ```
 
-**Способ 2: Пользовательский провайдер (Custom Provider)**
-В разделе "Пользовательский провайдер" можно настроить прямое обращение к эндпоинтам.
+**Method 2: Custom Provider**
+In the "Custom Provider" section, you can configure direct endpoint access.
 
-1. Включите опцию: **Использовать пользовательский URL для вызова API**.
-2. В поле **Пользовательский URL для вызова API** введите: `http://localhost:3317/v1/chat/completions`
-3. Включите опцию: **Передавать ключ API в заголовках пользовательского вызова**.
-4. В поле **Имя заголовка ключа API пользовательского вызова** введите: `Authorization`
-5. В поле **Пользовательский вызов API-ключа** введите токен с префиксом Bearer: `Bearer <ваш JWT токен клиента>`
+1. Enable the option: **Use custom API URL**.
+2. In the **Custom API URL** field, enter: `http://localhost:3317/v1/chat/completions`
+3. Enable the option: **Pass API key in custom call headers**.
+4. In the **Custom call API key header name** field, enter: `Authorization`
+5. In the **Custom call API key** field, enter the token with the Bearer prefix: `Bearer <your JWT client token>`
 
 ---
 
-## Настройка MCP (Model Context Protocol)
+## MCP Configuration (Model Context Protocol)
 
-Так как Nexus Balancer в основном работает в Docker и предоставляет MCP как HTTP-эндпоинт по пути `/mcp`, для подключения локальных клиентов, ожидающих стандартный stdio MCP (таких как Roo Code, OpenCode, LM Studio или Cline), вам потребуется использовать встроенный адаптер-мост.
+Since Nexus Balancer primarily runs in Docker and exposes MCP as an HTTP endpoint at `/mcp`, to connect local clients expecting standard stdio MCP (such as Roo Code, OpenCode, LM Studio, or Cline), you need to use the built-in bridge adapter.
 
-Сам бинарный файл `nexus_balancer` может работать в режиме адаптера, транслируя `stdio` запросы локальной машины в HTTP POST запросы к балансировщику (находящемуся в Docker или на удаленном хосте).
+The `nexus_balancer` binary itself can operate in adapter mode, translating `stdio` requests from the local machine into HTTP POST requests to the balancer (running in Docker or on a remote host).
 
-Обязательно установите корректный URL сервера и ключ авторизации через переменные окружения. По умолчанию адаптер стучится на `http://localhost:3317/mcp`.
+Make sure to set the correct server URL and authorization key via environment variables. By default, the adapter connects to `http://localhost:3317/mcp`.
 
-### Конфигурация для Roo Code и OpenCode
+### Configuration for Roo Code and OpenCode
 
-Добавьте следующий блок в файл `mcp.json` (обычно находится в `~/.config/roocode/mcp.json` или в настройках расширения):
+Add the following block to the `mcp.json` file (usually located at `~/.config/roocode/mcp.json` or in the extension settings):
 
 ```json
 {
@@ -202,23 +202,23 @@ cargo run
       "args": [
         "run",
         "--manifest-path",
-        "/путь/к/nexus_balancer/Cargo.toml",
+        "/path/to/nexus_balancer/Cargo.toml",
         "--",
         "mcp"
       ],
       "env": {
         "NEXUS_MCP_URL": "http://localhost:3317/mcp",
-        "NEXUS_API_KEY": "<ВАШ_API_КЛЮЧ>"
+        "NEXUS_API_KEY": "<YOUR_API_KEY>"
       }
     }
   }
 }
 ```
-*(Если у вас уже скомпилирован бинарный файл, вы можете указать `command: "/путь/к/nexus_balancer"` и `args: ["mcp"]` вместо `cargo run`)*
+*(If you already have a compiled binary, you can use `command: "/path/to/nexus_balancer"` and `args: ["mcp"]` instead of `cargo run`)*
 
-### Конфигурация для LM Studio
+### Configuration for LM Studio
 
-В настройках MCP LM Studio (раздел "Developer" -> "MCP") добавьте аналогичную конфигурацию:
+In LM Studio's MCP settings (section "Developer" -> "MCP"), add a similar configuration:
 
 ```json
 {
@@ -229,13 +229,13 @@ cargo run
         "run",
         "--quiet",
         "--manifest-path",
-        "/путь/к/nexus_balancer/Cargo.toml",
+        "/path/to/nexus_balancer/Cargo.toml",
         "--",
         "mcp"
       ],
       "env": {
         "NEXUS_MCP_URL": "http://localhost:3317/mcp",
-        "NEXUS_API_KEY": "<ВАШ_API_КЛЮЧ>"
+        "NEXUS_API_KEY": "<YOUR_API_KEY>"
       }
     }
   }
@@ -246,24 +246,24 @@ cargo run
 
 ## Dynamic Model Registry
 
-Балансировщик автоматически обнаруживает модели провайдеров через их `/models` эндпоинты.
+The balancer automatically discovers provider models through their `/models` endpoints.
 
-### Как это работает
+### How It Works
 
-1. **При старте**: для каждого пула (кроме `skip_model_sync: true`) выполняется HTTP-запрос к `{target_url}/models`.
-2. **Парсинг ответа**: OpenAI-совместимые провайдеры (`{data: [{id, owned_by, ...}]}`) и Google Gemini (`{models: [{name, inputTokenLimit, ...}]}`) обрабатываются разными парсерами.
-3. **Сохранение в SQLite**: модели upsert-ятся в таблицу `provider_models`. Старые записи помечаются `is_stale = 1` и удаляются через 24 часа.
-4. **In-memory кеш**: после синхронизации строится `HashMap<model_id, Vec<(pool_name, priority)>>`, отсортированный по `priority` DESC.
-5. **Роутинг**: при запросе `resolve_model(model_id)` возвращает pool_name с наивысшим приоритетом за O(1).
-6. **Периодическая синхронизация**: каждые 6 часов фоновый процесс обновляет реестр.
+1. **On startup**: for each pool (except `skip_model_sync: true`), an HTTP request is made to `{target_url}/models`.
+2. **Response parsing**: OpenAI-compatible providers (`{data: [{id, owned_by, ...}]}`) and Google Gemini (`{models: [{name, inputTokenLimit, ...}]}`) are handled by different parsers.
+3. **SQLite storage**: models are upserted into the `provider_models` table. Old records are marked `is_stale = 1` and deleted after 24 hours.
+4. **In-memory cache**: after sync, a `HashMap<model_id, Vec<(pool_name, priority)>>` is built, sorted by `priority` DESC.
+5. **Routing**: on request, `resolve_model(model_id)` returns the pool_name with the highest priority in O(1).
+6. **Periodic sync**: every 6 hours, a background process updates the registry.
 
 ### Graceful degradation
 
-Если API провайдера недоступен или ключ невалидный — sync пропускает этот пул с предупреждением, не краша сервер. Модели из предыдущей синхронизации остаются в БД до очистки stale (>24h).
+If a provider's API is unavailable or the key is invalid — the sync skips that pool with a warning, without crashing the server. Models from the previous sync remain in the DB until stale cleanup (>24h).
 
-## Диагностика и мониторинг
+## Diagnostics and Monitoring
 
-При старте выводится сводка обнаруженных моделей:
+On startup, a summary of discovered models is displayed:
 ```text
 [ModelRegistry] Starting initial model discovery...
 [ModelRegistry] Discovered 15 models from cerebras-pool
@@ -272,26 +272,26 @@ cargo run
  Models:  47 discovered across 3 providers
 ```
 
-Каждый проксируемый запрос логируется в режиме реального времени с указанием точных задержек:
+Each proxied request is logged in real-time with precise latency measurements:
 
 ```text
 [13:14:02.795] [DEBUG] Proxy: Processing request (Body size: 137060 bytes)
 [13:14:12.264] [DEBUG] Proxy: Upstream status 200 OK, Acquire: 487.2µs, Total: 9.46s
 ```
 
-- **Acquire**: Время, затраченное на получение свободного ключа из пула (обычно менее 1 мс).
-- **Total**: Полное время обработки запроса сервером от момента его получения до отправки ответа клиенту.
+- **Acquire**: Time spent obtaining a free key from the pool (typically less than 1 ms).
+- **Total**: Total request processing time on the server from receipt to response delivery.
 
 ---
 
-## Безопасность и администрирование
+## Security and Administration
 
-- **Авторизация**: Доступ к прокси-серверу возможен только при наличии валидного заголовка `Authorization: Bearer <token>`.
-- **Изоляция секретов**: Все файлы ключей клиентов физически изолированы на уровне файловой системы.
-- **Интерактивная панель**: Для тестирования и ознакомления со всеми эндпоинтами используйте Scalar-документацию по адресу `http://localhost:3317/scalar`.
+- **Authorization**: Access to the proxy server is only possible with a valid `Authorization: Bearer <token>` header.
+- **Secret isolation**: All client key files are physically isolated at the filesystem level.
+- **Interactive panel**: For testing and exploring all endpoints, use the Scalar documentation at `http://localhost:3317/scalar`.
 
 ---
 
-## Лицензия
+## License
 
-Проект распространяется под лицензией Apache-2.0. Подробности смотрите в файле [LICENSE](LICENSE).
+This project is distributed under the Apache-2.0 license. See the [LICENSE](LICENSE) file for details.
