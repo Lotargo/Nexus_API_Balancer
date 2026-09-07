@@ -3,12 +3,18 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 fn is_safe_name(name: &str) -> bool {
+    // Treat Windows separators as separators even when Nexus runs on Unix.
+    // Otherwise a value such as "..\\..\\windows" is a normal filename on Linux
+    // but becomes a traversal path if the same config/storage is used on Windows.
+    if name.is_empty() || name.contains('\\') || name.contains('\0') {
+        return false;
+    }
+
     let path = Path::new(name);
-    // Reject absolute paths, parent dir components, and empty segments
     !path.has_root()
-        && path.components().all(|c| {
-            matches!(c, std::path::Component::Normal(_))
-        })
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 #[derive(Clone)]
