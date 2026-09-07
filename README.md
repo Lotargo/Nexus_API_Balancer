@@ -41,6 +41,8 @@ graph TD
 - **High Concurrency**: Efficient async request pool management using `tokio` and `async-channel`.
 - **Dynamic Model Registry**: Automatic discovery of available models via provider `/models` endpoints on startup and every 6 hours. Models are stored in SQLite with an in-memory cache for fast O(1) lookup.
 - **Priority-based routing**: Pool priority (`priority` in config) determines which provider receives a request when a model is available from multiple providers.
+- **Capability-aware routing**: Pools can declare capabilities such as `chat` and `stt`. Existing configs default to `chat`.
+- **STT failover**: Multipart `/v1/audio/transcriptions` and `/v1/audio/translations` requests can move to the next eligible provider after 429, 5xx, timeout, or transport failure.
 - **Unified Routing Gateway**: Automatic request routing to the appropriate providers based on the dynamic model registry (with fallback to prefix-based heuristics).
 - **Multi-Provider Support**: Built-in support for OpenAI, Google Gemini, Anthropic Claude, Groq, Mistral, Cerebras, Cohere, DeepSeek, xAI (Grok), and SambaNova.
 - **Aggregated `/v1/models` Endpoint**: OpenAI-compatible endpoint returning all models available to the client from the registry.
@@ -80,6 +82,7 @@ pools:
     provider: "openai"
     target_url: "https://api.openai.com"
     capacity: 20
+    capabilities: ["chat"]          # e.g. ["chat"], ["stt"], or ["chat", "stt"]
     priority: 10                    # Pool priority (higher = preferred when models conflict)
     models_endpoint: "/models"      # Custom endpoint for model discovery (optional)
     skip_model_sync: false          # Disable auto-discovery for this pool
