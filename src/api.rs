@@ -297,6 +297,7 @@ pub struct AppState {
 }
 
 /// OAuth 2.1 Bearer Token extractor
+#[derive(Clone)]
 pub struct AuthToken(pub Claims);
 #[allow(dead_code)]
 pub struct AdminToken(pub Claims);
@@ -1125,6 +1126,10 @@ fn request_capability(path: &str) -> &'static str {
     }
 }
 
+fn is_failover_status(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
 fn multipart_boundary(headers: &HeaderMap) -> Option<String> {
     let content_type = headers.get(CONTENT_TYPE)?.to_str().ok()?;
     if !content_type
@@ -1256,38 +1261,42 @@ async fn handle_unified_proxy(
         Some(state.db.get_allowed_pools(&token.0.sub).await.unwrap_or_default())
     };
 
-    let find_pool = |providers: &[&str]| {
-        config.pools.iter()
+    let find_pools = |providers: &[&str]| {
+        let mut pools: Vec<(String, i32)> = config.pools.iter()
             .filter(|p| providers.contains(&p.provider.as_str()))
             .filter(|p| p.supports_capability(capability))
             .filter(|p| allowed_pools.as_ref().map_or(true, |allowed| allowed.contains(&p.name)))
-            .max_by(|a, b| a.priority.cmp(&b.priority))
-            .map(|p| p.name.clone())
+            .map(|p| (p.name.clone(), p.priority))
+            .collect();
+        pools.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        pools.into_iter().map(|(name, _)| name).collect::<Vec<_>>()
     };
 
-    let pool_name = if let Some(ref provider) = explicit_provider {
-        // Explicit provider from //provider//model.
-        find_pool(&[provider.as_str()])
+    let mut pool_candidates = if let Some(ref provider) = explicit_provider {
+        // Explicit routing stays inside the requested provider.
+        find_pools(&[provider.as_str()])
     } else if let Some(ref model) = model_name {
         if capability == "chat" {
-            // Existing model-first chat routing.
-            state.model_registry.resolve_model_filtered(model, allowed_pools.as_ref())
+            // Keep chat behavior conservative for now: one selected provider, no automatic
+            // replay of POST chat requests across providers.
+            let selected = state.model_registry.resolve_model_filtered(model, allowed_pools.as_ref())
                 .or_else(|| {
                     let model_low = model.to_lowercase();
                     if model_low.starts_with("gpt-") || model_low.starts_with("o1-") || model_low.starts_with("text-davinci") {
-                        find_pool(&["openai"])
+                        find_pools(&["openai"]).into_iter().next()
                     } else if model_low.starts_with("claude-") {
-                        find_pool(&["anthropic", "claude"])
+                        find_pools(&["anthropic", "claude"]).into_iter().next()
                     } else if model_low.starts_with("gemini-") {
-                        find_pool(&["google", "gemini"])
+                        find_pools(&["google", "gemini"]).into_iter().next()
                     } else if model_low.starts_with("deepseek-") {
-                        find_pool(&["deepseek"])
+                        find_pools(&["deepseek"]).into_iter().next()
                     } else if model_low.starts_with("mistral-") || model_low.starts_with("codestral-") || model_low.starts_with("pixtral-") || model_low.starts_with("ministral-") || model_low.starts_with("open-mixtral-") {
-                        find_pool(&["mistral"])
+                        find_pools(&["mistral"]).into_iter().next()
                     } else {
                         None
                     }
-                })
+                });
+            selected.into_iter().collect()
         } else {
             state.model_registry
                 .resolve_model_capability_candidates_filtered(
@@ -1295,55 +1304,77 @@ async fn handle_unified_proxy(
                     capability,
                     allowed_pools.as_ref(),
                 )
-                .into_iter()
-                .next()
         }
     } else if capability != "chat" {
         state.model_registry
             .resolve_capability_candidates_filtered(capability, allowed_pools.as_ref())
-            .into_iter()
-            .next()
     } else {
-        None
+        Vec::new()
     };
 
+    if pool_candidates.is_empty() {
+        pool_candidates = state.model_registry
+            .resolve_capability_candidates_filtered(capability, allowed_pools.as_ref());
+    }
+
+    pool_candidates.dedup();
+
     println!(
-        " [{}] [DEBUG] Routing request to pool: '{}' for model: '{:?}', capability: '{}' for client: '{}'",
+        " [{}] [DEBUG] Routing candidates: {:?} for model: '{:?}', capability: '{}' for client: '{}'",
         Local::now().format("%H:%M:%S%.3f"),
-        pool_name.as_deref().unwrap_or("none"),
+        pool_candidates,
         model_name,
         capability,
         token.0.sub
     );
 
-    // Fallback only to pools that can serve the requested capability.
-    let pool_name = pool_name.or_else(|| {
-        config.pools.iter()
-            .filter(|p| p.supports_capability(capability))
-            .filter(|p| allowed_pools.as_ref().map_or(true, |allowed| allowed.contains(&p.name)))
-            .max_by(|a, b| a.priority.cmp(&b.priority))
-            .map(|p| p.name.clone())
-    });
+    if pool_candidates.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            format!("No authorized pools available for capability '{}'", capability),
+        ).into_response();
+    }
 
-    let Some(pool_name) = pool_name else {
-        return (StatusCode::FORBIDDEN, "No authorized pools available for routing").into_response();
-    };
+    // Cross-provider replay is currently enabled only for non-chat capability requests.
+    // This gives STT resilient failover without changing chat completion semantics.
+    let allow_failover = capability != "chat" && explicit_provider.is_none();
+    drop(config);
 
-    // 5. Delegate to the standard proxy handler (re-using the logic)
-    // We create a new Path params map for handle_proxy
-    let mut params = HashMap::new();
-    params.insert("pool_name".to_string(), pool_name);
+    for (index, pool_name) in pool_candidates.iter().enumerate() {
+        let mut params = HashMap::new();
+        params.insert("pool_name".to_string(), pool_name.clone());
+        params.insert("path".to_string(), path.clone());
 
-    // the request path may already contain `/v1` prefix from unified routing
-    // e.g. `/v1/chat/completions`. We pass it entirely to handle_proxy_internal.
-    // handle_proxy_internal will append this to the target_url.
-    // if target_url is `https://api.mistral.ai/v1`, it becomes `https://api.mistral.ai/v1/v1/chat/completions`.
-    // to fix this, strip `/v1` if target_url also ends with `/v1`.
-    // We do this cleanup inside `build_target_url` to be safe for all providers.
+        let response = handle_proxy_internal(
+            state.clone(),
+            token.clone(),
+            method.clone(),
+            params,
+            uri.clone(),
+            headers.clone(),
+            body_bytes.clone(),
+        ).await;
 
-    params.insert("path".to_string(), path);
+        let has_next = index + 1 < pool_candidates.len();
+        if allow_failover && has_next && is_failover_status(response.status()) {
+            eprintln!(
+                " [{}] [WARN] Capability '{}' failed via pool '{}' with {}; trying '{}'",
+                Local::now().format("%H:%M:%S%.3f"),
+                capability,
+                pool_name,
+                response.status(),
+                pool_candidates[index + 1],
+            );
+            continue;
+        }
 
-    handle_proxy_internal(state, token, method, params, uri, headers, body_bytes).await
+        return response;
+    }
+
+    (
+        StatusCode::BAD_GATEWAY,
+        format!("All providers failed for capability '{}'", capability),
+    ).into_response()
 }
 
 async fn handle_proxy(
@@ -1538,6 +1569,11 @@ async fn handle_proxy_internal(
     match res {
         Some(resp) => {
             let status = resp.status();
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                key.set_cooldown(Duration::from_secs(60));
+            } else if status.is_server_error() {
+                key.set_cooldown(Duration::from_secs(10));
+            }
             let mut res_builder = Response::builder().status(status);
             let is_sse = resp
                 .headers()
@@ -1661,6 +1697,7 @@ async fn handle_proxy_internal(
             }
         }
         None => {
+            key.set_cooldown(Duration::from_secs(10));
             state.pools.get(&pool_name).unwrap().release(key).await;
             (StatusCode::BAD_GATEWAY, format!("502 Upstream error after {} retries: {}", max_retries, last_error)).into_response()
         }
