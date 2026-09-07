@@ -277,7 +277,7 @@ skip_model_sync: false
             capacity: 1,
             keys: vec![],
             priority,
-            capabilities: capabilities.into_iter().map(str::to_string).collect(),
+            capabilities: capabilities.into_iter().map(|item| item.to_string()).collect(),
             capability_models: HashMap::new(),
             models_endpoint: None,
             skip_model_sync: true,
