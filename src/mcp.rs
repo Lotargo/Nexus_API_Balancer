@@ -37,7 +37,10 @@ impl BalancerMcpServer {
                 "name": p.name,
                 "description": p.description.clone().unwrap_or_else(|| "No description provided".to_string()),
                 "key_count": p.keys.len(),
-                "capacity": p.capacity
+                "capacity": p.capacity,
+                "priority": p.priority,
+                "capabilities": p.capabilities,
+                "capability_models": p.capability_models
             })
         }).collect()
     }
@@ -242,6 +245,8 @@ mod tests {
                         secret_type: "bearer".to_string(),
                     }],
                     priority: 0,
+                    capabilities: vec!["chat".to_string()],
+                    capability_models: std::collections::HashMap::new(),
                     models_endpoint: None,
                     skip_model_sync: false,
                 },
