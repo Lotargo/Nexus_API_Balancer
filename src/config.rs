@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::collections::HashMap;
 use anyhow::Result;
 use utoipa::ToSchema;
 
@@ -40,6 +41,10 @@ pub struct KeyConfig {
     pub secret_type: String,
 }
 
+fn default_capabilities() -> Vec<String> {
+    vec!["chat".to_string()]
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct PoolConfig {
     pub name: String,
@@ -48,14 +53,35 @@ pub struct PoolConfig {
     pub target_url: String,
     pub capacity: usize,
     pub keys: Vec<KeyConfig>,
-    /// Priority when same model exists across multiple pools (higher = preferred). Default: 0
+    /// Priority when several pools can handle the same request. Higher values win.
     #[serde(default)]
     pub priority: i32,
+    /// Capabilities served by this pool. Existing configs default to chat for compatibility.
+    #[serde(default = "default_capabilities")]
+    pub capabilities: Vec<String>,
+    /// Optional upstream model override per capability, e.g. stt -> whisper-large-v3.
+    #[serde(default)]
+    pub capability_models: HashMap<String, String>,
     /// Custom endpoint for model listing. Default depends on provider.
     pub models_endpoint: Option<String>,
     /// Skip auto-discovery for this pool. Default: false
     #[serde(default)]
     pub skip_model_sync: bool,
+}
+
+impl PoolConfig {
+    pub fn supports_capability(&self, capability: &str) -> bool {
+        self.capabilities
+            .iter()
+            .any(|item| item.eq_ignore_ascii_case(capability))
+    }
+
+    pub fn model_for_capability(&self, capability: &str) -> Option<&str> {
+        self.capability_models
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(capability))
+            .map(|(_, model)| model.as_str())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
@@ -66,6 +92,32 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
+    pub fn capability_candidates(
+        &self,
+        capability: &str,
+        allowed_pools: Option<&Vec<String>>,
+    ) -> Vec<String> {
+        let mut candidates: Vec<&PoolConfig> = self
+            .pools
+            .iter()
+            .filter(|pool| pool.supports_capability(capability))
+            .filter(|pool| {
+                allowed_pools.map_or(true, |allowed| allowed.contains(&pool.name))
+            })
+            .collect();
+
+        candidates.sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+
+        candidates
+            .into_iter()
+            .map(|pool| pool.name.clone())
+            .collect()
+    }
+
     pub fn get_standard_url(provider: &str) -> Option<&'static str> {
         match provider.to_lowercase().as_str() {
             "openai" => Some("https://api.openai.com/v1"),
@@ -195,6 +247,68 @@ mod tests {
     #[test]
     fn test_default_cors_origin() {
         assert_eq!(default_cors_origin(), "http://localhost:3317");
+    }
+
+    #[test]
+    fn test_pool_capabilities_default_to_chat() {
+        let yaml = r#"
+name: test
+description: null
+provider: openai
+target_url: https://api.openai.com/v1
+capacity: 1
+keys: []
+priority: 0
+models_endpoint: null
+skip_model_sync: false
+"#;
+        let pool: PoolConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(pool.supports_capability("chat"));
+        assert!(!pool.supports_capability("stt"));
+    }
+
+    #[test]
+    fn test_capability_candidates_are_priority_sorted() {
+        let make_pool = |name: &str, priority: i32, capabilities: Vec<&str>| PoolConfig {
+            name: name.to_string(),
+            description: None,
+            provider: "test".to_string(),
+            target_url: "http://localhost".to_string(),
+            capacity: 1,
+            keys: vec![],
+            priority,
+            capabilities: capabilities.into_iter().map(str::to_string).collect(),
+            capability_models: HashMap::new(),
+            models_endpoint: None,
+            skip_model_sync: true,
+        };
+
+        let config = AppConfig {
+            server: ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 3317,
+                cors_allowed_origin: "http://localhost:3317".to_string(),
+            },
+            auth: AuthConfig {
+                enabled: false,
+                public_registration: false,
+                master_key: None,
+                admin_key: None,
+                secret: "test".to_string(),
+                issuer: "test".to_string(),
+                audience: "test".to_string(),
+            },
+            pools: vec![
+                make_pool("local", 10, vec!["stt"]),
+                make_pool("primary", 100, vec!["chat", "stt"]),
+                make_pool("chat-only", 200, vec!["chat"]),
+            ],
+        };
+
+        assert_eq!(
+            config.capability_candidates("stt", None),
+            vec!["primary".to_string(), "local".to_string()]
+        );
     }
 
     #[test]
