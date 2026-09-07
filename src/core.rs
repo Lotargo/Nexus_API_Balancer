@@ -192,6 +192,39 @@ impl KeyPool {
         key
     }
 
+    /// Acquire the first currently available key that can accept a request.
+    ///
+    /// A pool may contain multiple independent keys and multiple concurrency slots
+    /// for each key. A locally rate-limited/cooling key must not make the whole pool
+    /// fail while another key is ready.
+    pub async fn acquire_usable(&self) -> Result<ApiKey, String> {
+        let first = self.acquire().await;
+        let attempts = 1 + self.receiver.len();
+        let mut first = Some(first);
+        let mut last_error = "No usable keys available".to_string();
+
+        for attempt in 0..attempts {
+            let key = if attempt == 0 {
+                first.take().expect("first key is available")
+            } else {
+                match self.receiver.try_recv() {
+                    Ok(key) => key,
+                    Err(_) => break,
+                }
+            };
+
+            match key.try_use() {
+                Ok(()) => return Ok(key),
+                Err(error) => {
+                    last_error = error;
+                    self.release(key).await;
+                }
+            }
+        }
+
+        Err(last_error)
+    }
+
     pub async fn release(&self, key: ApiKey) {
         let id = key.id();
         self.sender.send(key).await.expect("Channel closed");
@@ -312,5 +345,62 @@ mod tests {
         let state = key.inner.lock().unwrap();
         assert_eq!(state.tokens_this_minute, 200);
         assert_eq!(state.tokens_today, 200);
+    }
+
+
+    #[tokio::test]
+    async fn test_acquire_usable_skips_rate_limited_key() {
+        let pool = KeyPool::new(2);
+        let blocked = ApiKey::new(
+            "blocked",
+            Some(0),
+            None,
+            None,
+            None,
+            None,
+            true,
+            "sk-blocked".to_string(),
+            "api_key".to_string(),
+            None,
+        );
+        let ready = ApiKey::new(
+            "ready",
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            "sk-ready".to_string(),
+            "api_key".to_string(),
+            None,
+        );
+
+        pool.add_key(blocked).unwrap();
+        pool.add_key(ready).unwrap();
+
+        let key = pool.acquire_usable().await.unwrap();
+        assert_eq!(key.id(), "ready");
+        pool.release(key).await;
+    }
+
+    #[tokio::test]
+    async fn test_acquire_usable_reports_exhausted_pool() {
+        let pool = KeyPool::new(1);
+        let blocked = ApiKey::new(
+            "blocked",
+            Some(0),
+            None,
+            None,
+            None,
+            None,
+            true,
+            "sk-blocked".to_string(),
+            "api_key".to_string(),
+            None,
+        );
+
+        pool.add_key(blocked).unwrap();
+        assert!(pool.acquire_usable().await.is_err());
     }
 }
