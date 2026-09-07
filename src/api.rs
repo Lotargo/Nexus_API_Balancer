@@ -1,6 +1,6 @@
 use axum::{
     extract::{State, FromRequestParts, Path},
-    http::{request::Parts, StatusCode, header::AUTHORIZATION, Method, HeaderMap, HeaderName, Response, Uri},
+    http::{request::Parts, StatusCode, header::{AUTHORIZATION, CONTENT_TYPE}, Method, HeaderMap, HeaderName, Response, Uri},
     routing::{get, post, any},
     response::IntoResponse,
     body::{to_bytes, Body, Bytes},
@@ -1117,6 +1117,90 @@ fn parse_explicit_model(model: &str) -> (Option<String>, String) {
     (None, model.to_string())
 }
 
+fn request_capability(path: &str) -> &'static str {
+    if path.contains("/audio/transcriptions") || path.contains("/audio/translations") {
+        "stt"
+    } else {
+        "chat"
+    }
+}
+
+fn multipart_boundary(headers: &HeaderMap) -> Option<String> {
+    let content_type = headers.get(CONTENT_TYPE)?.to_str().ok()?;
+    if !content_type
+        .split(';')
+        .next()
+        .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("multipart/form-data"))
+    {
+        return None;
+    }
+
+    content_type.split(';').skip(1).find_map(|part| {
+        let (name, value) = part.trim().split_once('=')?;
+        if !name.trim().eq_ignore_ascii_case("boundary") {
+            return None;
+        }
+
+        let boundary = value.trim().trim_matches('"');
+        (!boundary.is_empty()).then(|| boundary.to_string())
+    })
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8], start: usize) -> Option<usize> {
+    if needle.is_empty() || start > haystack.len() {
+        return None;
+    }
+
+    haystack
+        .get(start..)?
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|offset| start + offset)
+}
+
+fn multipart_text_field_range(
+    body: &[u8],
+    boundary: &str,
+    field_name: &str,
+) -> Option<std::ops::Range<usize>> {
+    let name_marker = format!("name=\"{}\"", field_name);
+    let field_header = find_subslice(body, name_marker.as_bytes(), 0)?;
+    let value_start = find_subslice(body, b"\r\n\r\n", field_header)? + 4;
+    let boundary_marker = format!("\r\n--{}", boundary);
+    let value_end = find_subslice(body, boundary_marker.as_bytes(), value_start)?;
+
+    (value_start <= value_end).then_some(value_start..value_end)
+}
+
+fn extract_request_model(headers: &HeaderMap, body: &Bytes) -> Option<String> {
+    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) {
+        return json
+            .get("model")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string);
+    }
+
+    let boundary = multipart_boundary(headers)?;
+    let range = multipart_text_field_range(body, &boundary, "model")?;
+    std::str::from_utf8(&body[range]).ok().map(|value| value.trim().to_string())
+}
+
+fn rewrite_request_model(headers: &HeaderMap, body: &Bytes, model: &str) -> Option<Bytes> {
+    if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(body) {
+        json.as_object_mut()?
+            .insert("model".to_string(), serde_json::Value::String(model.to_string()));
+        return serde_json::to_vec(&json).ok().map(Bytes::from);
+    }
+
+    let boundary = multipart_boundary(headers)?;
+    let range = multipart_text_field_range(body, &boundary, "model")?;
+    let mut rewritten = Vec::with_capacity(body.len() - range.len() + model.len());
+    rewritten.extend_from_slice(&body[..range.start]);
+    rewritten.extend_from_slice(model.as_bytes());
+    rewritten.extend_from_slice(&body[range.end..]);
+    Some(Bytes::from(rewritten))
+}
+
 /// Unified Gateway Handler: Routes requests based on the 'model' field in the body
 async fn handle_unified_proxy(
     State(state): State<Arc<AppState>>,
@@ -1129,27 +1213,26 @@ async fn handle_unified_proxy(
     let path = uri.path().to_string();
     let mut body_bytes = to_bytes(body, 25 * 1024 * 1024).await.unwrap_or_default();
 
-    // 1. Try to detect model from body
-    let mut model_name = if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-        json["model"].as_str().map(|s| s.to_string())
-    } else {
-        None
-    };
+    // 1. Detect model from JSON or multipart/form-data.
+    let mut model_name = extract_request_model(&headers, &body_bytes);
+    let capability = request_capability(&path);
 
-    // 2. Check for explicit provider routing via `//provider//model` format
+    // 2. Check for explicit provider routing via `//provider//model` format.
+    // The model field is rewritten for both JSON and multipart requests so the
+    // provider only receives the real model name.
     let mut explicit_provider: Option<String> = None;
-    if let Some(ref model) = model_name.clone() {
-        let (provider, real_model) = parse_explicit_model(model);
+    if let Some(model) = model_name.clone() {
+        let (provider, real_model) = parse_explicit_model(&model);
         if let Some(prov) = provider {
             explicit_provider = Some(prov);
-            // Rewrite body with real model name (without //provider// prefix)
-            if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-                if let Some(obj) = json.as_object_mut() {
-                    obj.insert("model".to_string(), serde_json::Value::String(real_model.clone()));
-                    body_bytes = Bytes::from(serde_json::to_vec(&json).unwrap_or(body_bytes.to_vec()));
-                    model_name = Some(real_model);
-                }
-            }
+            let Some(rewritten) = rewrite_request_model(&headers, &body_bytes, &real_model) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "Unable to rewrite explicit provider model in request body".to_string(),
+                ).into_response();
+            };
+            body_bytes = rewritten;
+            model_name = Some(real_model);
         }
     }
 
@@ -1176,45 +1259,69 @@ async fn handle_unified_proxy(
     let find_pool = |providers: &[&str]| {
         config.pools.iter()
             .filter(|p| providers.contains(&p.provider.as_str()))
+            .filter(|p| p.supports_capability(capability))
             .filter(|p| allowed_pools.as_ref().map_or(true, |allowed| allowed.contains(&p.name)))
-            .next()
+            .max_by(|a, b| a.priority.cmp(&b.priority))
             .map(|p| p.name.clone())
     };
 
     let pool_name = if let Some(ref provider) = explicit_provider {
-        // Explicit provider from //provider//model
+        // Explicit provider from //provider//model.
         find_pool(&[provider.as_str()])
     } else if let Some(ref model) = model_name {
-        // Data-driven routing via ModelRegistry
-        state.model_registry.resolve_model_filtered(model, allowed_pools.as_ref())
-            .or_else(|| {
-                // Fallback: try to find by provider name heuristics if model not in registry
-                let model_low = model.to_lowercase();
-                if model_low.starts_with("gpt-") || model_low.starts_with("o1-") || model_low.starts_with("text-davinci") {
-                    find_pool(&["openai"])
-                } else if model_low.starts_with("claude-") {
-                    find_pool(&["anthropic", "claude"])
-                } else if model_low.starts_with("gemini-") {
-                    find_pool(&["google", "gemini"])
-                } else if model_low.starts_with("deepseek-") {
-                    find_pool(&["deepseek"])
-                } else if model_low.starts_with("mistral-") || model_low.starts_with("codestral-") || model_low.starts_with("pixtral-") || model_low.starts_with("ministral-") || model_low.starts_with("open-mixtral-") {
-                    find_pool(&["mistral"])
-                } else {
-                    None
-                }
-            })
+        if capability == "chat" {
+            // Existing model-first chat routing.
+            state.model_registry.resolve_model_filtered(model, allowed_pools.as_ref())
+                .or_else(|| {
+                    let model_low = model.to_lowercase();
+                    if model_low.starts_with("gpt-") || model_low.starts_with("o1-") || model_low.starts_with("text-davinci") {
+                        find_pool(&["openai"])
+                    } else if model_low.starts_with("claude-") {
+                        find_pool(&["anthropic", "claude"])
+                    } else if model_low.starts_with("gemini-") {
+                        find_pool(&["google", "gemini"])
+                    } else if model_low.starts_with("deepseek-") {
+                        find_pool(&["deepseek"])
+                    } else if model_low.starts_with("mistral-") || model_low.starts_with("codestral-") || model_low.starts_with("pixtral-") || model_low.starts_with("ministral-") || model_low.starts_with("open-mixtral-") {
+                        find_pool(&["mistral"])
+                    } else {
+                        None
+                    }
+                })
+        } else {
+            state.model_registry
+                .resolve_model_capability_candidates_filtered(
+                    model,
+                    capability,
+                    allowed_pools.as_ref(),
+                )
+                .into_iter()
+                .next()
+        }
+    } else if capability != "chat" {
+        state.model_registry
+            .resolve_capability_candidates_filtered(capability, allowed_pools.as_ref())
+            .into_iter()
+            .next()
     } else {
         None
     };
 
-    println!(" [{}] [DEBUG] Routing request to pool: '{}' for model: '{:?}' for client: '{}'", Local::now().format("%H:%M:%S%.3f"), pool_name.as_deref().unwrap_or("none"), model_name, token.0.sub);
+    println!(
+        " [{}] [DEBUG] Routing request to pool: '{}' for model: '{:?}', capability: '{}' for client: '{}'",
+        Local::now().format("%H:%M:%S%.3f"),
+        pool_name.as_deref().unwrap_or("none"),
+        model_name,
+        capability,
+        token.0.sub
+    );
 
-    // Fallback to first allowed pool if no match or no model
+    // Fallback only to pools that can serve the requested capability.
     let pool_name = pool_name.or_else(|| {
         config.pools.iter()
+            .filter(|p| p.supports_capability(capability))
             .filter(|p| allowed_pools.as_ref().map_or(true, |allowed| allowed.contains(&p.name)))
-            .next()
+            .max_by(|a, b| a.priority.cmp(&b.priority))
             .map(|p| p.name.clone())
     });
 
