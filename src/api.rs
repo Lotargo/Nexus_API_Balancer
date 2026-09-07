@@ -1704,3 +1704,73 @@ async fn handle_proxy_internal(
         }
     }
 }
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn detects_request_capability() {
+        assert_eq!(request_capability("/v1/chat/completions"), "chat");
+        assert_eq!(request_capability("/v1/audio/transcriptions"), "stt");
+        assert_eq!(request_capability("/v1/audio/translations"), "stt");
+    }
+
+    #[test]
+    fn extracts_json_model() {
+        let headers = HeaderMap::new();
+        let body = Bytes::from_static(br#"{"model":"gpt-test"}"#);
+        assert_eq!(
+            extract_request_model(&headers, &body).as_deref(),
+            Some("gpt-test")
+        );
+    }
+
+    #[test]
+    fn extracts_and_rewrites_multipart_model() {
+        let boundary = "nexus-test-boundary";
+        let raw = format!(
+            "--{boundary}\r\n\
+Content-Disposition: form-data; name=\"file\"; filename=\"sample.wav\"\r\n\
+Content-Type: audio/wav\r\n\r\n\
+RIFFfakeaudio\r\n\
+--{boundary}\r\n\
+Content-Disposition: form-data; name=\"model\"\r\n\r\n\
+//groq//whisper-large-v3-turbo\r\n\
+--{boundary}--\r\n"
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_str(&format!("multipart/form-data; boundary={boundary}")).unwrap(),
+        );
+        let body = Bytes::from(raw);
+
+        assert_eq!(
+            extract_request_model(&headers, &body).as_deref(),
+            Some("//groq//whisper-large-v3-turbo")
+        );
+
+        let rewritten =
+            rewrite_request_model(&headers, &body, "whisper-large-v3-turbo").unwrap();
+
+        assert_eq!(
+            extract_request_model(&headers, &rewritten).as_deref(),
+            Some("whisper-large-v3-turbo")
+        );
+        assert!(std::str::from_utf8(&rewritten)
+            .unwrap()
+            .contains("RIFFfakeaudio"));
+    }
+
+    #[test]
+    fn failover_statuses_are_limited_to_throttling_and_server_errors() {
+        assert!(is_failover_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_failover_status(StatusCode::BAD_GATEWAY));
+        assert!(is_failover_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(!is_failover_status(StatusCode::BAD_REQUEST));
+        assert!(!is_failover_status(StatusCode::UNAUTHORIZED));
+    }
+}
