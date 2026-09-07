@@ -155,16 +155,32 @@ impl ModelRegistry {
             .map(|(pool_name, _)| pool_name.clone())
     }
 
-    /// Resolve model filtering by allowed pools
+    /// Resolve model filtering by allowed pools.
     pub fn resolve_model_filtered(&self, model_id: &str, allowed_pools: Option<&Vec<String>>) -> Option<String> {
+        self.resolve_model_candidates_filtered(model_id, allowed_pools)
+            .into_iter()
+            .next()
+    }
+
+    /// Return every pool serving a model, already ordered by configured priority.
+    pub fn resolve_model_candidates_filtered(
+        &self,
+        model_id: &str,
+        allowed_pools: Option<&Vec<String>>,
+    ) -> Vec<String> {
         let cache = self.cache.read().unwrap();
-        cache.get(model_id).and_then(|pools| {
-            pools.iter()
-                .find(|(pool_name, _)| {
-                    allowed_pools.map_or(true, |ap| ap.contains(pool_name))
-                })
-                .map(|(pool_name, _)| pool_name.clone())
-        })
+        cache
+            .get(model_id)
+            .map(|pools| {
+                pools
+                    .iter()
+                    .filter(|(pool_name, _)| {
+                        allowed_pools.map_or(true, |ap| ap.contains(pool_name))
+                    })
+                    .map(|(pool_name, _)| pool_name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn rebuild_cache(&self) {
