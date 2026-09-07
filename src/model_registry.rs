@@ -147,24 +147,98 @@ impl ModelRegistry {
         Ok(parse_models_response(&pool_cfg.provider, &body))
     }
 
-    /// O(1) lookup: returns the best pool name for a model based on priority
+    /// O(1) lookup: returns the best pool name for a model based on priority.
     pub fn resolve_model(&self, model_id: &str) -> Option<String> {
-        let cache = self.cache.read().unwrap();
-        cache.get(model_id)
-            .and_then(|pools| pools.first())
-            .map(|(pool_name, _)| pool_name.clone())
+        self.resolve_model_candidates_filtered(model_id, None)
+            .into_iter()
+            .next()
     }
 
-    /// Resolve model filtering by allowed pools
+    /// Resolve the best model pool while respecting client pool permissions.
     pub fn resolve_model_filtered(&self, model_id: &str, allowed_pools: Option<&Vec<String>>) -> Option<String> {
+        self.resolve_model_candidates_filtered(model_id, allowed_pools)
+            .into_iter()
+            .next()
+    }
+
+    /// Return every pool serving a model, ordered by priority descending.
+    ///
+    /// Keeping the full candidate list is important for cross-provider failover:
+    /// callers can try the next pool when the preferred upstream is unavailable.
+    pub fn resolve_model_candidates_filtered(
+        &self,
+        model_id: &str,
+        allowed_pools: Option<&Vec<String>>,
+    ) -> Vec<String> {
         let cache = self.cache.read().unwrap();
-        cache.get(model_id).and_then(|pools| {
-            pools.iter()
-                .find(|(pool_name, _)| {
-                    allowed_pools.map_or(true, |ap| ap.contains(pool_name))
-                })
-                .map(|(pool_name, _)| pool_name.clone())
-        })
+        cache
+            .get(model_id)
+            .map(|pools| {
+                pools
+                    .iter()
+                    .filter(|(pool_name, _)| {
+                        allowed_pools.map_or(true, |ap| ap.contains(pool_name))
+                    })
+                    .map(|(pool_name, _)| pool_name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Return configured pools that expose a capability, ordered by priority.
+    ///
+    /// This also covers local or manually configured providers that intentionally
+    /// skip model discovery.
+    pub fn resolve_capability_candidates_filtered(
+        &self,
+        capability: &str,
+        allowed_pools: Option<&Vec<String>>,
+    ) -> Vec<String> {
+        let config = self.config.load();
+        let mut pools: Vec<(String, i32)> = config
+            .pools
+            .iter()
+            .filter(|pool| pool.supports_capability(capability))
+            .filter(|pool| {
+                allowed_pools.map_or(true, |allowed| allowed.contains(&pool.name))
+            })
+            .map(|pool| (pool.name.clone(), pool.priority))
+            .collect();
+
+        pools.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        pools.into_iter().map(|(name, _)| name).collect()
+    }
+
+    /// Resolve pools for a model and capability.
+    ///
+    /// Known model candidates are preferred. If discovery does not know the
+    /// model, capability routing falls back to configured capability pools.
+    pub fn resolve_model_capability_candidates_filtered(
+        &self,
+        model_id: &str,
+        capability: &str,
+        allowed_pools: Option<&Vec<String>>,
+    ) -> Vec<String> {
+        let config = self.config.load();
+        let model_candidates = self.resolve_model_candidates_filtered(model_id, allowed_pools);
+        let mut filtered = Vec::new();
+
+        for pool_name in model_candidates {
+            if config
+                .pools
+                .iter()
+                .find(|pool| pool.name == pool_name)
+                .is_some_and(|pool| pool.supports_capability(capability))
+            {
+                filtered.push(pool_name);
+            }
+        }
+
+        if filtered.is_empty() {
+            self.resolve_capability_candidates_filtered(capability, allowed_pools)
+        } else {
+            filtered
+        }
     }
 
     fn rebuild_cache(&self) {
