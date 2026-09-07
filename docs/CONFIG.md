@@ -25,6 +25,7 @@ pools:
     provider: "openai"
     target_url: "https://api.openai.com/v1"
     capacity: 100
+    capabilities: ["chat"]
     priority: 0
     models_endpoint: null
     skip_model_sync: false
@@ -40,6 +41,30 @@ pools:
         max_request_tokens: 128000
         cooldown_on_limit: false
 ```
+
+## Pool Capabilities
+
+Pools declare what kind of workload they can serve:
+
+```yaml
+capabilities: ["chat"]
+```
+
+Existing configs that omit this field default to `["chat"]`.
+
+For an STT provider:
+
+```yaml
+capabilities: ["stt"]
+```
+
+A provider may expose more than one capability:
+
+```yaml
+capabilities: ["chat", "stt"]
+```
+
+The unified gateway treats `/v1/audio/transcriptions` and `/v1/audio/translations` as `stt` requests. Multipart `model` fields are used for routing. STT requests may fail over to the next eligible provider by pool priority on HTTP 429, 5xx, timeout, or upstream transport failure.
 
 ## Environment Variables
 
