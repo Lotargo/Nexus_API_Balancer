@@ -182,6 +182,8 @@ impl BalancerMcpServer {
                 capacity: 20,
                 keys: vec![key_cfg.clone()],
                 priority: 0,
+                capabilities: vec!["chat".to_string()],
+                capability_models: std::collections::HashMap::new(),
                 models_endpoint: None,
                 skip_model_sync: false,
             };
@@ -251,6 +253,8 @@ mod tests {
                     capacity: 5,
                     keys: vec![],
                     priority: 0,
+                    capabilities: vec!["chat".to_string()],
+                    capability_models: std::collections::HashMap::new(),
                     models_endpoint: None,
                     skip_model_sync: false,
                 },
