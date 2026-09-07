@@ -21,6 +21,7 @@ pools:
     # Base URL for Gemini. Versioning (v1/v1beta) is managed by the balancer.
     target_url: "https://generativelanguage.googleapis.com"
     capacity: 20
+    capabilities: ["chat"]
     priority: 10
     # Custom endpoint for model discovery (defaults to /models)
     # models_endpoint: "/models"
@@ -42,6 +43,7 @@ pools:
     provider: "openai"
     target_url: "https://api.openai.com"
     capacity: 20
+    capabilities: ["chat"]
     priority: 5
     keys:
       - id: "OPENAI_KEY_1"
