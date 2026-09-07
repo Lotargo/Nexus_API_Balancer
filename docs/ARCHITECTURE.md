@@ -42,11 +42,13 @@ The server starts via `run_server()` in `lib.rs`:
 1. Client sends request to Axum HTTP server
 2. `AuthToken`/`AdminToken` extractor validates JWT or API key (or admin key bypass)
 3. Router matches path to handler (`proxy`, `unified`, `mcp`, `admin`, etc.)
-4. Unified gateway (`/v1/*`) resolves model via: (a) explicit `//provider//model` prefix, (b) Model Registry O(1) lookup, (c) heuristic fallback
-5. Proxy handler acquires key from pool, forwards request to upstream provider
-6. SSE responses are streamed with tokio channels; non-SSE bodies are buffered
-7. Failed requests retry up to 2 times (non-streaming GET/HEAD only) with exponential backoff (500ms, 1000ms)
-8. Usage is logged to SQLite; tokens accounted to key rate limits
+4. Unified gateway (`/v1/*`) detects request capability and model. JSON chat requests use existing model routing; multipart audio transcription/translation requests use `stt` capability routing.
+5. Capability routing builds an ordered pool candidate list by model, capability, client access, and pool priority.
+6. Proxy handler acquires a key from the selected pool and forwards the original request body and content type to the upstream provider.
+7. STT requests can fail over across provider pools after 429, 5xx, timeout, or transport failure. Explicit `//provider//model` routing does not escape the selected provider.
+8. Same-pool GET/HEAD retries keep the existing exponential backoff behavior.
+9. SSE responses are streamed with tokio channels; non-SSE bodies are buffered.
+10. Usage is logged to SQLite; tokens accounted to key rate limits.
 
 ## Key Pool Design
 
@@ -58,13 +60,18 @@ When `kv_cache` is enabled for a client on a Google pool, requests are automatic
 
 ## Unified Proxy
 
-`handle_unified_proxy()` (api.rs:1121) routes by model:
-1. Parse `model` field from request body or `/models/{name}` path
-2. Check for explicit `//provider//model` prefix
-3. Query Model Registry for pool with highest priority
-4. Fallback to heuristic prefix matching (gpt- → openai, claude- → anthropic, etc.)
-5. Fallback to first allowed pool
-6. Delegate to `handle_proxy_internal()`
+`handle_unified_proxy()` routes by model and capability:
+
+1. Detect `chat` or `stt` from the request path.
+2. Parse `model` from JSON or multipart form data.
+3. Check for explicit `//provider//model` routing and rewrite the forwarded model field.
+4. Resolve candidate pools through Model Registry plus configured pool capabilities.
+5. Sort candidates by priority.
+6. For chat, keep conservative single-provider behavior.
+7. For STT, try the next eligible provider on retriable upstream failure.
+8. Delegate each attempt to `handle_proxy_internal()`.
+
+Provider-side 429 responses place the key in a short cooldown. 5xx and transport failures use a shorter cooldown before the pool is considered again.
 
 ## Threading Model
 
