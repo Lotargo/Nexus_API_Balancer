@@ -146,10 +146,154 @@ fn is_streaming_request(bytes: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
+
+fn request_capability(path: &str) -> Option<&'static str> {
+    let path = path.split('?').next().unwrap_or(path).trim_end_matches('/');
+    if path.ends_with("/audio/transcriptions") || path.ends_with("/audio/translations") {
+        Some("stt")
+    } else {
+        None
+    }
+}
+
+fn multipart_boundary(headers: &HeaderMap) -> Option<String> {
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)?
+        .to_str()
+        .ok()?;
+
+    if !content_type
+        .to_ascii_lowercase()
+        .starts_with("multipart/form-data")
+    {
+        return None;
+    }
+
+    content_type.split(';').skip(1).find_map(|part| {
+        let part = part.trim();
+        let value = part.strip_prefix("boundary=")?;
+        Some(value.trim_matches('"').to_string())
+    })
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8], start: usize) -> Option<usize> {
+    if needle.is_empty() || start >= haystack.len() {
+        return None;
+    }
+
+    haystack[start..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|offset| start + offset)
+}
+
+fn multipart_text_field_range(
+    body: &[u8],
+    boundary: &str,
+    field_name: &str,
+) -> Option<(usize, usize)> {
+    let boundary_marker = format!("--{}", boundary).into_bytes();
+    let next_boundary_marker = format!("\r\n--{}", boundary).into_bytes();
+    let wanted = format!("name=\"{}\"", field_name).to_ascii_lowercase();
+    let mut cursor = 0;
+
+    while let Some(boundary_start) = find_subslice(body, &boundary_marker, cursor) {
+        let headers_start = boundary_start + boundary_marker.len();
+        if body.get(headers_start..headers_start + 2) == Some(b"--") {
+            break;
+        }
+
+        let headers_end = find_subslice(body, b"\r\n\r\n", headers_start)?;
+        let headers_text = std::str::from_utf8(&body[headers_start..headers_end])
+            .ok()?
+            .to_ascii_lowercase();
+
+        let value_start = headers_end + 4;
+        let value_end = find_subslice(body, &next_boundary_marker, value_start)?;
+
+        if headers_text.contains("content-disposition: form-data")
+            && headers_text.contains(&wanted)
+        {
+            return Some((value_start, value_end));
+        }
+
+        cursor = value_end + 2;
+    }
+
+    None
+}
+
+fn extract_model_from_request(headers: &HeaderMap, body: &[u8]) -> Option<String> {
+    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) {
+        return json
+            .get("model")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+    }
+
+    let boundary = multipart_boundary(headers)?;
+    let (start, end) = multipart_text_field_range(body, &boundary, "model")?;
+    std::str::from_utf8(&body[start..end])
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn rewrite_model_in_request(headers: &HeaderMap, body: &Bytes, model: &str) -> Bytes {
+    if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(body) {
+        if let Some(object) = json.as_object_mut() {
+            object.insert(
+                "model".to_string(),
+                serde_json::Value::String(model.to_string()),
+            );
+            if let Ok(encoded) = serde_json::to_vec(&json) {
+                return Bytes::from(encoded);
+            }
+        }
+        return body.clone();
+    }
+
+    let Some(boundary) = multipart_boundary(headers) else {
+        return body.clone();
+    };
+    let Some((start, end)) = multipart_text_field_range(body, &boundary, "model") else {
+        return body.clone();
+    };
+
+    let mut rewritten = Vec::with_capacity(body.len() - (end - start) + model.len());
+    rewritten.extend_from_slice(&body[..start]);
+    rewritten.extend_from_slice(model.as_bytes());
+    rewritten.extend_from_slice(&body[end..]);
+    Bytes::from(rewritten)
+}
+
+fn should_failover_status(status: StatusCode) -> bool {
+    status.is_server_error()
+        || matches!(
+            status,
+            StatusCode::UNAUTHORIZED
+                | StatusCode::FORBIDDEN
+                | StatusCode::NOT_FOUND
+                | StatusCode::REQUEST_TIMEOUT
+                | StatusCode::TOO_MANY_REQUESTS
+        )
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_target_url, extract_response_tokens, is_streaming_request, parse_explicit_model, should_forward_request_header};
-    use axum::http::HeaderName;
+    use super::{
+        build_target_url, extract_model_from_request, extract_response_tokens,
+        is_streaming_request, parse_explicit_model, request_capability,
+        rewrite_model_in_request, should_failover_status, should_forward_request_header,
+    };
+    use axum::body::Bytes;
+    use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 
     #[test]
     fn parses_explicit_provider_model() {
@@ -238,6 +382,55 @@ data: [DONE]
 
         let content_type = HeaderName::from_static("content-type");
         assert!(should_forward_request_header(&content_type));
+    }
+
+
+    #[test]
+    fn detects_stt_paths() {
+        assert_eq!(request_capability("/v1/audio/transcriptions"), Some("stt"));
+        assert_eq!(request_capability("/v1/audio/translations"), Some("stt"));
+        assert_eq!(request_capability("/v1/chat/completions"), None);
+    }
+
+    #[test]
+    fn extracts_and_rewrites_multipart_model() {
+        let boundary = "nexus-test-boundary";
+        let body = format!(
+            "--{0}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nstt-default\r\n--{0}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"sample.wav\"\r\nContent-Type: audio/wav\r\n\r\nRIFFDATA\r\n--{0}--\r\n",
+            boundary
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            HeaderValue::from_str(&format!("multipart/form-data; boundary={}", boundary)).unwrap(),
+        );
+
+        assert_eq!(
+            extract_model_from_request(&headers, body.as_bytes()).as_deref(),
+            Some("stt-default")
+        );
+
+        let rewritten = rewrite_model_in_request(
+            &headers,
+            &Bytes::from(body.into_bytes()),
+            "whisper-large-v3",
+        );
+
+        assert_eq!(
+            extract_model_from_request(&headers, &rewritten).as_deref(),
+            Some("whisper-large-v3")
+        );
+        assert!(std::str::from_utf8(&rewritten).unwrap().contains("RIFFDATA"));
+    }
+
+    #[test]
+    fn failover_statuses_are_transport_or_provider_failures() {
+        assert!(should_failover_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(should_failover_status(StatusCode::BAD_GATEWAY));
+        assert!(should_failover_status(StatusCode::UNAUTHORIZED));
+        assert!(!should_failover_status(StatusCode::BAD_REQUEST));
+        assert!(!should_failover_status(StatusCode::UNPROCESSABLE_ENTITY));
     }
 }
 
@@ -1117,7 +1310,7 @@ fn parse_explicit_model(model: &str) -> (Option<String>, String) {
     (None, model.to_string())
 }
 
-/// Unified Gateway Handler: Routes requests based on the 'model' field in the body
+/// Unified Gateway Handler: routes chat by model and media requests by capability.
 async fn handle_unified_proxy(
     State(state): State<Arc<AppState>>,
     token: AuthToken,
@@ -1127,70 +1320,199 @@ async fn handle_unified_proxy(
     body: Body,
 ) -> impl axum::response::IntoResponse {
     let path = uri.path().to_string();
+    let capability = request_capability(&path);
     let mut body_bytes = to_bytes(body, 25 * 1024 * 1024).await.unwrap_or_default();
 
-    // 1. Try to detect model from body
-    let mut model_name = if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-        json["model"].as_str().map(|s| s.to_string())
-    } else {
-        None
-    };
+    // JSON requests and OpenAI-compatible multipart STT both expose a model field.
+    let mut model_name = extract_model_from_request(&headers, &body_bytes);
 
-    // 2. Check for explicit provider routing via `//provider//model` format
+    // Explicit provider routing remains available for both JSON and multipart:
+    // model=//groq//whisper-large-v3.
     let mut explicit_provider: Option<String> = None;
-    if let Some(ref model) = model_name.clone() {
-        let (provider, real_model) = parse_explicit_model(model);
-        if let Some(prov) = provider {
-            explicit_provider = Some(prov);
-            // Rewrite body with real model name (without //provider// prefix)
-            if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-                if let Some(obj) = json.as_object_mut() {
-                    obj.insert("model".to_string(), serde_json::Value::String(real_model.clone()));
-                    body_bytes = Bytes::from(serde_json::to_vec(&json).unwrap_or(body_bytes.to_vec()));
-                    model_name = Some(real_model);
-                }
-            }
+    if let Some(model) = model_name.clone() {
+        let (provider, real_model) = parse_explicit_model(&model);
+        if let Some(provider) = provider {
+            explicit_provider = Some(provider);
+            body_bytes = rewrite_model_in_request(&headers, &body_bytes, &real_model);
+            model_name = Some(real_model);
         }
     }
 
-    // 3. If not in body, try to detect from path (Google Gemini style: /v1beta/models/...)
+    // Google Gemini style model path fallback.
     if model_name.is_none() {
         if let Some(idx) = path.find("/models/") {
             let model_part = &path[idx + 8..];
-            // Take up to the first ':' or '/'
-            let model = model_part.split(':').next().unwrap_or(model_part).split('/').next().unwrap_or(model_part);
+            let model = model_part
+                .split(':')
+                .next()
+                .unwrap_or(model_part)
+                .split('/')
+                .next()
+                .unwrap_or(model_part);
             model_name = Some(model.to_string());
         }
     }
 
-    // 4. Routing Logic: Find the best pool
-    let config = state.config.load();
+    let config = state.config.load_full();
 
-    // Get allowed pools for this client
     let allowed_pools = if token.0.role.as_deref() == Some("admin") {
-        None // Admin sees all
+        None
     } else {
-        Some(state.db.get_allowed_pools(&token.0.sub).await.unwrap_or_default())
+        Some(
+            state
+                .db
+                .get_allowed_pools(&token.0.sub)
+                .await
+                .unwrap_or_default(),
+        )
     };
+
+    if capability == Some("stt") {
+        let Some(model) = model_name.clone() else {
+            return (
+                StatusCode::BAD_REQUEST,
+                "STT requests must include a model field".to_string(),
+            )
+                .into_response();
+        };
+
+        let mut candidates = Vec::new();
+
+        if let Some(provider) = explicit_provider.as_deref() {
+            let mut matching: Vec<_> = config
+                .pools
+                .iter()
+                .filter(|pool| pool.provider.eq_ignore_ascii_case(provider))
+                .filter(|pool| pool.supports_capability("stt"))
+                .filter(|pool| {
+                    allowed_pools
+                        .as_ref()
+                        .map_or(true, |allowed| allowed.contains(&pool.name))
+                })
+                .collect();
+
+            matching.sort_by(|a, b| b.priority.cmp(&a.priority));
+            for pool in matching {
+                push_unique(&mut candidates, pool.name.clone());
+            }
+        } else {
+            // If the requested model exists in the registry, prefer its pools first.
+            for pool_name in state
+                .model_registry
+                .resolve_model_candidates_filtered(&model, allowed_pools.as_ref())
+            {
+                if config
+                    .pools
+                    .iter()
+                    .find(|pool| pool.name == pool_name)
+                    .is_some_and(|pool| pool.supports_capability("stt"))
+                {
+                    push_unique(&mut candidates, pool_name);
+                }
+            }
+
+            // Then append every remaining STT-capable pool by priority. Each pool may
+            // rewrite the logical model to its own upstream model.
+            for pool_name in config.capability_candidates("stt", allowed_pools.as_ref()) {
+                push_unique(&mut candidates, pool_name);
+            }
+        }
+
+        if candidates.is_empty() {
+            return (
+                StatusCode::FORBIDDEN,
+                "No authorized STT-capable pools available".to_string(),
+            )
+                .into_response();
+        }
+
+        println!(
+            " [{}] [DEBUG] STT candidates for model '{}': {:?}",
+            Local::now().format("%H:%M:%S%.3f"),
+            model,
+            candidates
+        );
+
+        let candidate_count = candidates.len();
+        for (index, pool_name) in candidates.into_iter().enumerate() {
+            let pool_cfg = config
+                .pools
+                .iter()
+                .find(|pool| pool.name == pool_name)
+                .expect("candidate pool must exist");
+
+            let upstream_model = if explicit_provider.is_some() {
+                model.as_str()
+            } else {
+                pool_cfg.model_for_capability("stt").unwrap_or(&model)
+            };
+
+            let candidate_body =
+                rewrite_model_in_request(&headers, &body_bytes, upstream_model);
+
+            let mut params = HashMap::new();
+            params.insert("pool_name".to_string(), pool_name.clone());
+            params.insert("path".to_string(), path.clone());
+
+            let response = handle_proxy_internal(
+                state.clone(),
+                AuthToken(token.0.clone()),
+                method.clone(),
+                params,
+                uri.clone(),
+                headers.clone(),
+                candidate_body,
+            )
+            .await;
+
+            let status = response.status();
+            let is_last = index + 1 == candidate_count;
+
+            if status.is_success()
+                || explicit_provider.is_some()
+                || is_last
+                || !should_failover_status(status)
+            {
+                return response;
+            }
+
+            eprintln!(
+                " [{}] [WARN] STT pool '{}' returned {}; trying next provider",
+                Local::now().format("%H:%M:%S%.3f"),
+                pool_name,
+                status
+            );
+        }
+
+        unreachable!("non-empty STT candidate list always returns a response");
+    }
 
     let find_pool = |providers: &[&str]| {
-        config.pools.iter()
-            .filter(|p| providers.contains(&p.provider.as_str()))
-            .filter(|p| allowed_pools.as_ref().map_or(true, |allowed| allowed.contains(&p.name)))
+        config
+            .pools
+            .iter()
+            .filter(|pool| providers.contains(&pool.provider.as_str()))
+            .filter(|pool| {
+                allowed_pools
+                    .as_ref()
+                    .map_or(true, |allowed| allowed.contains(&pool.name))
+            })
             .next()
-            .map(|p| p.name.clone())
+            .map(|pool| pool.name.clone())
     };
 
-    let pool_name = if let Some(ref provider) = explicit_provider {
-        // Explicit provider from //provider//model
-        find_pool(&[provider.as_str()])
-    } else if let Some(ref model) = model_name {
-        // Data-driven routing via ModelRegistry
-        state.model_registry.resolve_model_filtered(model, allowed_pools.as_ref())
+    let pool_name = if let Some(provider) = explicit_provider.as_deref() {
+        find_pool(&[provider])
+    } else if let Some(model) = model_name.as_ref() {
+        state
+            .model_registry
+            .resolve_model_filtered(model, allowed_pools.as_ref())
             .or_else(|| {
-                // Fallback: try to find by provider name heuristics if model not in registry
                 let model_low = model.to_lowercase();
-                if model_low.starts_with("gpt-") || model_low.starts_with("o1-") || model_low.starts_with("text-davinci") {
+                if model_low.starts_with("gpt-")
+                    || model_low.starts_with("o1-")
+                    || model_low.starts_with("text-davinci")
+                {
                     find_pool(&["openai"])
                 } else if model_low.starts_with("claude-") {
                     find_pool(&["anthropic", "claude"])
@@ -1198,7 +1520,12 @@ async fn handle_unified_proxy(
                     find_pool(&["google", "gemini"])
                 } else if model_low.starts_with("deepseek-") {
                     find_pool(&["deepseek"])
-                } else if model_low.starts_with("mistral-") || model_low.starts_with("codestral-") || model_low.starts_with("pixtral-") || model_low.starts_with("ministral-") || model_low.starts_with("open-mixtral-") {
+                } else if model_low.starts_with("mistral-")
+                    || model_low.starts_with("codestral-")
+                    || model_low.starts_with("pixtral-")
+                    || model_low.starts_with("ministral-")
+                    || model_low.starts_with("open-mixtral-")
+                {
                     find_pool(&["mistral"])
                 } else {
                     None
@@ -1208,32 +1535,37 @@ async fn handle_unified_proxy(
         None
     };
 
-    println!(" [{}] [DEBUG] Routing request to pool: '{}' for model: '{:?}' for client: '{}'", Local::now().format("%H:%M:%S%.3f"), pool_name.as_deref().unwrap_or("none"), model_name, token.0.sub);
+    println!(
+        " [{}] [DEBUG] Routing request to pool: '{}' for model: '{:?}' for client: '{}'",
+        Local::now().format("%H:%M:%S%.3f"),
+        pool_name.as_deref().unwrap_or("none"),
+        model_name,
+        token.0.sub
+    );
 
-    // Fallback to first allowed pool if no match or no model
     let pool_name = pool_name.or_else(|| {
-        config.pools.iter()
-            .filter(|p| allowed_pools.as_ref().map_or(true, |allowed| allowed.contains(&p.name)))
+        config
+            .pools
+            .iter()
+            .filter(|pool| {
+                allowed_pools
+                    .as_ref()
+                    .map_or(true, |allowed| allowed.contains(&pool.name))
+            })
             .next()
-            .map(|p| p.name.clone())
+            .map(|pool| pool.name.clone())
     });
 
     let Some(pool_name) = pool_name else {
-        return (StatusCode::FORBIDDEN, "No authorized pools available for routing").into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            "No authorized pools available for routing",
+        )
+            .into_response();
     };
 
-    // 5. Delegate to the standard proxy handler (re-using the logic)
-    // We create a new Path params map for handle_proxy
     let mut params = HashMap::new();
     params.insert("pool_name".to_string(), pool_name);
-
-    // the request path may already contain `/v1` prefix from unified routing
-    // e.g. `/v1/chat/completions`. We pass it entirely to handle_proxy_internal.
-    // handle_proxy_internal will append this to the target_url.
-    // if target_url is `https://api.mistral.ai/v1`, it becomes `https://api.mistral.ai/v1/v1/chat/completions`.
-    // to fix this, strip `/v1` if target_url also ends with `/v1`.
-    // We do this cleanup inside `build_target_url` to be safe for all providers.
-
     params.insert("path".to_string(), path);
 
     handle_proxy_internal(state, token, method, params, uri, headers, body_bytes).await
