@@ -26,6 +26,8 @@ pools:
     target_url: "https://api.openai.com/v1"
     capacity: 100
     priority: 0
+    capabilities: ["chat"]
+    capability_models: {}
     models_endpoint: null
     skip_model_sync: false
     keys:
@@ -40,6 +42,34 @@ pools:
         max_request_tokens: 128000
         cooldown_on_limit: false
 ```
+
+## Capability Routing
+
+Each pool declares what kind of requests it can serve:
+
+```yaml
+capabilities: ["chat", "stt"]
+capability_models:
+  stt: "provider-specific-stt-model"
+```
+
+Existing configs that omit `capabilities` default to `["chat"]` for backwards compatibility.
+
+For `POST /v1/audio/transcriptions` and `POST /v1/audio/translations`, Nexus:
+
+1. reads the `model` field from OpenAI-compatible multipart form data;
+2. resolves STT-capable pools by priority;
+3. optionally rewrites the logical model to `capability_models.stt`;
+4. forwards the original multipart body;
+5. falls back to the next STT provider on transport/provider failures such as 401/403/404/408/429/5xx.
+
+An explicit provider can still be forced through the model field:
+
+```text
+//groq//whisper-large-v3
+```
+
+Explicit provider routing disables cross-provider failover for that request.
 
 ## Environment Variables
 
