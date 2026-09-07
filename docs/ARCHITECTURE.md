@@ -5,7 +5,12 @@ nexus_balancer is a high-performance Rust proxy server and intelligent key balan
 ## Overview
 
 ```
-Client → Axum HTTP Server → Auth Layer → Proxy/Balancer → Upstream AI Provider
+Client → Axum HTTP Server → Auth Layer → Request Router → Proxy/Balancer → Upstream AI Provider
+                                             ↓
+                                      Capability Router
+                                      (chat / stt / ...)
+                                             ↓
+                                      Provider candidates
                                         → MCP Server
                                         → Model Registry
 ```
@@ -42,11 +47,14 @@ The server starts via `run_server()` in `lib.rs`:
 1. Client sends request to Axum HTTP server
 2. `AuthToken`/`AdminToken` extractor validates JWT or API key (or admin key bypass)
 3. Router matches path to handler (`proxy`, `unified`, `mcp`, `admin`, etc.)
-4. Unified gateway (`/v1/*`) resolves model via: (a) explicit `//provider//model` prefix, (b) Model Registry O(1) lookup, (c) heuristic fallback
-5. Proxy handler acquires key from pool, forwards request to upstream provider
-6. SSE responses are streamed with tokio channels; non-SSE bodies are buffered
-7. Failed requests retry up to 2 times (non-streaming GET/HEAD only) with exponential backoff (500ms, 1000ms)
-8. Usage is logged to SQLite; tokens accounted to key rate limits
+4. Unified gateway (`/v1/*`) detects request capability when applicable.
+5. Chat requests resolve model via: (a) explicit `//provider//model` prefix, (b) Model Registry O(1) lookup, (c) heuristic fallback.
+6. STT requests on `/audio/transcriptions` or `/audio/translations` parse the multipart `model` field and build an ordered list of STT-capable pools.
+7. Proxy handler acquires a key from the selected pool and forwards the request.
+8. SSE responses are streamed with tokio channels; non-SSE bodies are buffered.
+9. Existing same-pool retries remain limited to non-streaming GET/HEAD.
+10. Capability routing may fail over between different STT provider pools on provider/transport failures.
+11. Usage is logged to SQLite; tokens are accounted to key rate limits where applicable.
 
 ## Key Pool Design
 
@@ -69,3 +77,39 @@ When `kv_cache` is enabled for a client on a Google pool, requests are automatic
 ## Threading Model
 
 Single Tokio runtime. `ArcSwap` for lock-free config reloading. `RwLock` for model cache. `Mutex` for per-key state counters.
+
+
+## Capability Routing
+
+Pool capabilities are configuration-level metadata. A pool may serve one or more capabilities:
+
+```text
+chat
+stt
+tts
+vision
+embeddings
+...
+```
+
+The first implemented media capability is `stt`.
+
+```text
+POST /v1/audio/transcriptions
+            ↓
+extract multipart model
+            ↓
+model registry candidates
+            +
+STT capability candidates
+            ↓
+sort/deduplicate by priority
+            ↓
+provider-specific model rewrite
+            ↓
+proxy
+            ↓
+fail over to next provider when appropriate
+```
+
+This layer is deliberately separate from the existing multi-key pool logic. Multi-key balancing remains an intra-pool concern, while capability failover selects between independent provider pools.
