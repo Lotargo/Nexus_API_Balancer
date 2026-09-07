@@ -724,39 +724,37 @@ async fn handle_execute(
         None => return Json(ExecuteResponse { status: "error".to_string(), key_id: "none".to_string(), message: "No pools configured".to_string() }),
     };
 
-    let key = pool.acquire().await;
-    
-    let result = if let Err(e) = key.try_use() {
-        pool.release(key).await;
-        
-        let response = ExecuteResponse {
-            status: "error".to_string(),
-            key_id: "none".to_string(),
-            message: format!("Rate limit hit: {}", e),
-        };
+    let key = match pool.acquire_usable().await {
+        Ok(key) => key,
+        Err(e) => {
+            let response = ExecuteResponse {
+                status: "error".to_string(),
+                key_id: "none".to_string(),
+                message: format!("Rate limit hit: {}", e),
+            };
 
-        // Log failure
-        let _ = state.db.log_request(LogEntry {
-            client_id: Some(token.0.sub),
-            key_id: None,
-            pool_id: None,
-            status: "rate_limited".to_string(),
-            latency_ms: Some(start.elapsed().as_millis() as i64),
-            error_message: Some(e.to_string()),
-            request_ip: None,
-            tokens_used: 0,
-        }).await;
+            let _ = state.db.log_request(LogEntry {
+                client_id: Some(token.0.sub),
+                key_id: None,
+                pool_id: None,
+                status: "rate_limited".to_string(),
+                latency_ms: Some(start.elapsed().as_millis() as i64),
+                error_message: Some(e),
+                request_ip: None,
+                tokens_used: 0,
+            }).await;
 
-        return Json(response);
-    } else {
-        let key_id = key.id();
-        pool.release(key).await;
-
-        ExecuteResponse {
-            status: "success".to_string(),
-            key_id: key_id.clone(),
-            message: format!("Task '{}' completed safely", payload.task_name),
+            return Json(response);
         }
+    };
+
+    let key_id = key.id();
+    pool.release(key).await;
+
+    let result = ExecuteResponse {
+        status: "success".to_string(),
+        key_id: key_id.clone(),
+        message: format!("Task '{}' completed safely", payload.task_name),
     };
 
     // Log success
@@ -1635,7 +1633,16 @@ async fn handle_proxy_internal(
         Some(p) => p,
         None => return (StatusCode::NOT_FOUND, "Pool implementation not found").into_response(),
     };
-    let key = pool.acquire().await;
+    let key = match pool.acquire_usable().await {
+        Ok(key) => key,
+        Err(e) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                format!("No usable key available in pool '{}': {}", pool_name, e),
+            )
+                .into_response();
+        }
+    };
     let acquire_elapsed = start_time.elapsed();
     let key_id = key.id();
 
@@ -1655,12 +1662,6 @@ async fn handle_proxy_internal(
         }
     }
 
-    // Check limits
-    if let Err(e) = key.try_use() {
-        pool.release(key).await;
-        return (StatusCode::TOO_MANY_REQUESTS, format!("Rate limit exceeded for key {}: {}", key_id, e)).into_response();
-    }
-    
     // Get actual secret from storage
     let secret = {
         let inner = key.inner.lock().unwrap();
