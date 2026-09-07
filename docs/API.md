@@ -10,7 +10,7 @@ Interactive docs available at `/scalar` (via utoipa-scalar).
 |--------|------|------|-------------|
 | `ANY` | `/proxy/{pool_name}` | Bearer | Proxy request to named pool |
 | `ANY` | `/proxy/{pool_name}/*path` | Bearer | Proxy with path suffix |
-| `ANY` | `/v1/*path` | Bearer | Unified gateway — auto-routes by model |
+| `ANY` | `/v1/*path` | Bearer | Unified gateway — routes by model or capability |
 | `ANY` | `/v1beta/*path` | Bearer | Unified gateway (Gemini compat) |
 
 ### Model Discovery
@@ -62,3 +62,29 @@ The unified gateway (`/v1/*`) routes by:
 1. **Explicit prefix**: `//provider//model_name` in the model field
 2. **Model Registry**: O(1) lookup from auto-discovered models
 3. **Heuristic fallback**: model name prefix matching (gpt- → openai, claude- → anthropic, gemini- → gemini, etc.)
+
+
+## Speech-to-Text
+
+OpenAI-compatible STT is accepted through the unified gateway:
+
+```http
+POST /v1/audio/transcriptions
+Content-Type: multipart/form-data
+Authorization: Bearer <nexus-client-token>
+```
+
+Required form fields:
+
+- `file` - audio payload
+- `model` - a concrete model, a logical model alias, or `//provider//model` for explicit routing
+
+STT requests are limited to pools declaring the `stt` capability. When no explicit provider is requested, Nexus builds an ordered candidate list and can fail over to the next provider pool on 401, 403, 404, 408, 429, or 5xx responses.
+
+A pool may map the client model to a provider-specific model:
+
+```yaml
+capabilities: ["stt"]
+capability_models:
+  stt: "provider-model-id"
+```
