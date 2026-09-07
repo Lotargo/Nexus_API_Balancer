@@ -40,7 +40,8 @@ graph TD
 
 - **High Concurrency**: Efficient async request pool management using `tokio` and `async-channel`.
 - **Dynamic Model Registry**: Automatic discovery of available models via provider `/models` endpoints on startup and every 6 hours. Models are stored in SQLite with an in-memory cache for fast O(1) lookup.
-- **Priority-based routing**: Pool priority (`priority` in config) determines which provider receives a request when a model is available from multiple providers.
+- **Priority-based routing**: Pool priority (`priority` in config) determines which provider receives a request when a model or capability is available from multiple providers.
+- **Capability-aware routing**: Pools can declare capabilities such as `chat` and `stt`. OpenAI-compatible speech transcription requests can fail over between independent STT providers.
 - **Unified Routing Gateway**: Automatic request routing to the appropriate providers based on the dynamic model registry (with fallback to prefix-based heuristics).
 - **Multi-Provider Support**: Built-in support for OpenAI, Google Gemini, Anthropic Claude, Groq, Mistral, Cerebras, Cohere, DeepSeek, xAI (Grok), and SambaNova.
 - **Aggregated `/v1/models` Endpoint**: OpenAI-compatible endpoint returning all models available to the client from the registry.
@@ -80,7 +81,9 @@ pools:
     provider: "openai"
     target_url: "https://api.openai.com"
     capacity: 20
-    priority: 10                    # Pool priority (higher = preferred when models conflict)
+    priority: 10                    # Pool priority (higher = preferred when routes conflict)
+    capabilities: ["chat"]           # Existing configs default to chat
+    capability_models: {}            # Optional per-capability upstream model override
     models_endpoint: "/models"      # Custom endpoint for model discovery (optional)
     skip_model_sync: false          # Disable auto-discovery for this pool
     keys:
@@ -94,8 +97,10 @@ pools:
         cooldown_on_limit: true # Send key to cooldown when limits are exceeded
 ```
 
-**Model Registry Fields:**
-- `priority` — integer. When models conflict (the same model available from multiple providers), the request is routed to the pool with the highest `priority`.
+**Routing Fields:**
+- `priority` — integer. Higher values are preferred when several pools can serve the same model or capability.
+- `capabilities` — request classes served by the pool. Existing configs default to `["chat"]`.
+- `capability_models` — optional provider-specific model overrides, for example `stt: whisper-large-v3`.
 - `models_endpoint` — optional path to the provider's model list endpoint. Defaults to `/models`. For Google Gemini — `/models` (parsed separately).
 - `skip_model_sync` — if `true`, the pool is excluded from model auto-discovery on startup and periodic sync.
 
@@ -244,6 +249,19 @@ In LM Studio's MCP settings (section "Developer" -> "MCP"), add a similar config
 ```
 
 ---
+
+## Speech-to-Text routing
+
+OpenAI-compatible multipart requests sent to:
+
+```text
+POST /v1/audio/transcriptions
+POST /v1/audio/translations
+```
+
+are routed only through pools that declare `stt`. Nexus can rewrite a logical model name to a provider-specific model through `capability_models.stt`, then try the next provider pool if the current upstream returns a provider/transport failure.
+
+The existing multi-key logic remains intact inside each pool. Cross-provider STT failover is a separate layer above it.
 
 ## Dynamic Model Registry
 
