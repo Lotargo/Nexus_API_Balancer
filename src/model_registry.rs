@@ -234,11 +234,13 @@ impl ModelRegistry {
             }
         }
 
-        if filtered.is_empty() {
-            self.resolve_capability_candidates_filtered(capability, allowed_pools)
-        } else {
-            filtered
+        for fallback in self.resolve_capability_candidates_filtered(capability, allowed_pools) {
+            if !filtered.contains(&fallback) {
+                filtered.push(fallback);
+            }
         }
+
+        filtered
     }
 
     fn rebuild_cache(&self) {
