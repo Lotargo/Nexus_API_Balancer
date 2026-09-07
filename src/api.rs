@@ -1312,7 +1312,7 @@ async fn handle_unified_proxy(
         Vec::new()
     };
 
-    if pool_candidates.is_empty() {
+    if pool_candidates.is_empty() && explicit_provider.is_none() {
         pool_candidates = state.model_registry
             .resolve_capability_candidates_filtered(capability, allowed_pools.as_ref());
     }
@@ -1338,6 +1338,7 @@ async fn handle_unified_proxy(
     // Cross-provider replay is currently enabled only for non-chat capability requests.
     // This gives STT resilient failover without changing chat completion semantics.
     let allow_failover = capability != "chat" && explicit_provider.is_none();
+    drop(find_pools);
     drop(config);
 
     for (index, pool_name) in pool_candidates.iter().enumerate() {
