@@ -22,6 +22,8 @@ pools:
     target_url: "https://generativelanguage.googleapis.com"
     capacity: 20
     priority: 10
+    capabilities: ["chat"]
+    capability_models: {}
     # Custom endpoint for model discovery (defaults to /models)
     # models_endpoint: "/models"
     # Set to true to skip auto-discovery for this pool
@@ -43,6 +45,8 @@ pools:
     target_url: "https://api.openai.com"
     capacity: 20
     priority: 5
+    capabilities: ["chat"]
+    capability_models: {}
     keys:
       - id: "OPENAI_KEY_1"
         secret_name: "openai_key_1"
@@ -52,3 +56,26 @@ pools:
         tpm_limit: 60000
         max_request_tokens: 16000
         cooldown_on_limit: true
+
+
+# Example STT pool. The client may send a logical model such as "stt-default";
+# Nexus rewrites it to this provider-specific model before forwarding.
+#
+#  - name: "stt-primary"
+#    description: "Primary OpenAI-compatible speech-to-text pool"
+#    provider: "groq"
+#    target_url: "https://api.groq.com/openai/v1"
+#    capacity: 10
+#    priority: 100
+#    capabilities: ["stt"]
+#    capability_models:
+#      stt: "provider-stt-model"
+#    skip_model_sync: true
+#    keys:
+#      - id: "STT_KEY"
+#        secret_name: "stt_key.txt"
+#        secret_type: "api_key"
+#        concurrency: 2
+#        rps_limit: null
+#        tpm_limit: null
+#        cooldown_on_limit: true
