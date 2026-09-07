@@ -37,7 +37,8 @@ impl BalancerMcpServer {
                 "name": p.name,
                 "description": p.description.clone().unwrap_or_else(|| "No description provided".to_string()),
                 "key_count": p.keys.len(),
-                "capacity": p.capacity
+                "capacity": p.capacity,
+                "capabilities": p.capabilities
             })
         }).collect()
     }
@@ -181,6 +182,7 @@ impl BalancerMcpServer {
                 target_url: target_url.clone(),
                 capacity: 20,
                 keys: vec![key_cfg.clone()],
+                capabilities: vec!["chat".to_string()],
                 priority: 0,
                 models_endpoint: None,
                 skip_model_sync: false,
@@ -239,6 +241,7 @@ mod tests {
                         secret_name: "openai_key.txt".to_string(),
                         secret_type: "bearer".to_string(),
                     }],
+                    capabilities: vec!["chat".to_string()],
                     priority: 0,
                     models_endpoint: None,
                     skip_model_sync: false,
@@ -250,6 +253,7 @@ mod tests {
                     target_url: "https://generativelanguage.googleapis.com".to_string(),
                     capacity: 5,
                     keys: vec![],
+                    capabilities: vec!["chat".to_string(), "stt".to_string()],
                     priority: 0,
                     models_endpoint: None,
                     skip_model_sync: false,
@@ -281,6 +285,7 @@ mod tests {
         assert_eq!(pools[0]["description"], "Primary pool");
         assert_eq!(pools[0]["key_count"], 1);
         assert_eq!(pools[0]["capacity"], 10);
+        assert_eq!(pools[0]["capabilities"][0], "chat");
         assert_eq!(pools[1]["name"], "pool-2");
         assert_eq!(pools[1]["description"], "No description provided");
         assert_eq!(pools[1]["key_count"], 0);
