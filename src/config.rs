@@ -48,6 +48,9 @@ pub struct PoolConfig {
     pub target_url: String,
     pub capacity: usize,
     pub keys: Vec<KeyConfig>,
+    /// Capabilities exposed by this pool. Existing configs default to chat-only.
+    #[serde(default = "default_pool_capabilities")]
+    pub capabilities: Vec<String>,
     /// Priority when same model exists across multiple pools (higher = preferred). Default: 0
     #[serde(default)]
     pub priority: i32,
@@ -56,6 +59,18 @@ pub struct PoolConfig {
     /// Skip auto-discovery for this pool. Default: false
     #[serde(default)]
     pub skip_model_sync: bool,
+}
+
+fn default_pool_capabilities() -> Vec<String> {
+    vec!["chat".to_string()]
+}
+
+impl PoolConfig {
+    pub fn supports_capability(&self, capability: &str) -> bool {
+        self.capabilities
+            .iter()
+            .any(|item| item.eq_ignore_ascii_case(capability))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
@@ -195,6 +210,42 @@ mod tests {
     #[test]
     fn test_default_cors_origin() {
         assert_eq!(default_cors_origin(), "http://localhost:3317");
+    }
+
+    #[test]
+    fn test_pool_capabilities_default_to_chat() {
+        let yaml = r#"
+name: test
+description: null
+provider: openai
+target_url: https://api.openai.com/v1
+capacity: 1
+keys: []
+priority: 0
+models_endpoint: null
+skip_model_sync: false
+"#;
+        let pool: PoolConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(pool.capabilities, vec!["chat".to_string()]);
+        assert!(pool.supports_capability("chat"));
+        assert!(!pool.supports_capability("stt"));
+    }
+
+    #[test]
+    fn test_pool_capabilities_are_case_insensitive() {
+        let pool = PoolConfig {
+            name: "stt".to_string(),
+            description: None,
+            provider: "groq".to_string(),
+            target_url: "https://api.groq.com/openai/v1".to_string(),
+            capacity: 1,
+            keys: vec![],
+            capabilities: vec!["STT".to_string()],
+            priority: 10,
+            models_endpoint: None,
+            skip_model_sync: false,
+        };
+        assert!(pool.supports_capability("stt"));
     }
 
     #[test]
